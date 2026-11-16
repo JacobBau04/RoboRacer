@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.DS_Store
+mpc/data/
+*.mcap
+*.npz
+COLCON_IGNORE
+.classroom50.yaml
+.github/

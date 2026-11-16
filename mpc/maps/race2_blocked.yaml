@@ -1,0 +1,10 @@
+# race2_blocked: copy of particle_filter/maps/race2_remapped_edited.yaml with the side
+# openings closed off and small noise specks cleared by make_centerline.py.
+# For min_curv_raceline only: the particle filter keeps using the full map.
+image: race2_blocked.pgm
+mode: trinary
+resolution: 0.05
+origin: [-13.115, -10.466, 0]
+negate: 0
+occupied_thresh: 0.65
+free_thresh: 0.196
