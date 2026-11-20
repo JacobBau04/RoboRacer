@@ -1,0 +1,23 @@
+# sensor_prep (estimators 1A, 1B): raw car sensors -> /prep/* with noise (R). Values as tested 2026-11-18/19.
+# Car inputs: /odom (vesc_to_odom), /sensors/imu/raw (VESC BMI160, 50 Hz, DEG/S, empty frame_id),
+# /sensors/servo_position_command.
+sensor_prep:
+  ros__parameters:
+    odom_in: /odom
+    imu_in: /sensors/imu/raw
+    servo_in: /sensors/servo_position_command
+    base_frame: base_link
+    speed_scale: 1.0              # kept 1.0 on purpose: tape test (2026-11-17) says /odom reads 5.9 % high (1.059), but the MPC commands use the same -4363.1 scale; apply 1.059 offline when scoring
+    sigma_v: 0.025                # m/s: OL1 (2026-11-18) 1B speed NIS 0.02 at 0.05, innovation std 0.028 m/s; at rest the VESC reports exactly 0
+    low_speed: 0.5
+    low_speed_inflation: 4.0
+    accel_threshold: 4.0
+    accel_inflation: 4.0
+    gyro_scale: 0.017453292519943295   # deg/s -> rad/s: vesc_driver publishes gyro in deg/s (vesc_packet.cpp)
+    gyro_offset: 0.0080           # rad/s fallback only (+0.46 deg/s, still recordings 2026-11-09); start-up calibration replaces it
+    sigma_w: 0.03                 # rad/s: gyro noise WHILE DRIVING (OL1 2026-11-18: 0.031, vibration; at rest 0.00114)
+    gyro_calib_seconds: 2.0
+    servo_gain: -0.8              # = f1tenth_stack vesc.yaml steering_angle_to_servo_gain (check on test day)
+    servo_offset: 0.469           # = vesc.yaml steering_angle_to_servo_offset
+    variance_floor: 1.0e-6
+    sigma_vy: 0.2

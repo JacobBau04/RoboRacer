@@ -1,0 +1,4 @@
+# 1C: shadow EKF with a = kp (v_cmd - v) from the speed command. Not on the car yet: needs the car speed model
+# (state_estimation/shadow_accel.py still uses the sim's controller) and a node.
+available: false
+reason: "1C needs the car speed model in shadow_accel.py and a live node; it only runs offline for now."

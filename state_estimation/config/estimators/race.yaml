@@ -1,0 +1,8 @@
+# race (A_car): the race-2 setup, unchanged. Particle filter in odom mode on raw /odom (wheel speed + steering
+# command), LiDAR correction, its own map -> laser TF. The MPC moves the LiDAR pose to the rear axle (pose_offset)
+# and compensates the whole delay (localization + servo) with delay_comp.
+available: true
+mpc:
+  pose_topic: pf/pose/odom
+  pose_offset: 0.27
+  delay_comp: 0.20

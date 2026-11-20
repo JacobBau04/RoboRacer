@@ -1,0 +1,3 @@
+# 2A: stage 2 estimator, not written yet. Add its nodes to estimation_launch.py and set available: true.
+available: false
+reason: "2A (stage 2) is not implemented yet."

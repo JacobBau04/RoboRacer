@@ -1,0 +1,8 @@
+# 1B: same chain as 1A, but the assembler predicts with the shadow EKF (bicycle yaw model with the steering
+# command, a = 0). The particle filter's motion prior stays 1A. Not driven on the car yet (procedure step 8).
+available: true
+assembler_ekf_topic: /shadow_ekf1/odometry
+mpc:
+  pose_topic: /state_estimate
+  pose_offset: 0.0
+  delay_comp: 0.14

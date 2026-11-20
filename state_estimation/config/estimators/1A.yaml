@@ -1,0 +1,9 @@
+# 1A: robot_localization EKF (wheel speed + gyro) -> particle filter in scan mode -> state_assembler
+# (rear axle, predicted to now) -> /state_estimate. Driven on 2026-11-18/19 as C_car (runs C1, C2).
+# delay_comp 0.14 = 0.20 minus the ~0.06 s localization delay the assembler already removes.
+available: true
+assembler_ekf_topic: /ekf1/odometry
+mpc:
+  pose_topic: /state_estimate
+  pose_offset: 0.0
+  delay_comp: 0.14

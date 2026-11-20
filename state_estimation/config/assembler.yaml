@@ -1,0 +1,12 @@
+# state_assembler (1A/1B): PF pose -> rear axle, predicted to now -> /state_estimate. ekf_topic set per estimator.
+state_assembler:
+  ros__parameters:
+    base_frame: base_link
+    lidar_offset: 0.27
+    ekf_topic: /ekf1/odometry     # stage1_car.launch.py ekf_topic:= overrides (C_car-1B)
+    compensation: true
+    predict_to_now: true
+    twist_point: rear_axle        # kinematic MPC state is at the rear axle
+    sideslip_k: 0.0               # sim-fitted k is not valid on the car; kinematic MPC ignores vy
+    publish_tf: false             # CAR: map -> odom would sit on vesc_to_odom's odom -> base_link, not EKF1's
+    publish_every: 2              # 25 Hz /state_estimate = race PF rate, so the MPC runs at the same rate in A and C (from C2 on)

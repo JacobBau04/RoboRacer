@@ -1,0 +1,7 @@
+# 1B shadow EKF (shadow_ekf1): runs alongside 1A for comparison, or feeds the assembler with estimator 1B.
+# Q is still the sim's (q_diag in params.ShadowNoise); its NIS on the car is far below 1 (2026-11-18): retune offline.
+shadow_ekf1:
+  ros__parameters:
+    L: 0.324                 # measured wheelbase (TUNING_LOG R9)
+    base_frame: base_link
+    odom_frame: odom

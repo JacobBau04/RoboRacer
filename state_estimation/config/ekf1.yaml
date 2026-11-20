@@ -1,0 +1,100 @@
+# TODO (Jacob): think about implementing the commanded steering angle into the dynamics model or measurement for EKF_1. Would this be helpful?
+# Now: 1A uses NO steering (wheel speed + gyro only). robot_localization can take it as a control input
+# (use_control + a Twist command: v, v*tan(delta)/L), but the car turns only ~0.77-0.89x the command (C1, 2026-11-19).
+# 1A: robot_localization EKF1 (node ekf1). Car config as tested 2026-11-18/19 (Q from the sim).
+# On the car /prep/imu arrives at 50 Hz (VESC gyro), not 100 Hz as written below.
+# =====================================================================================================
+# FILTER 1A: robot_localization EKF1. The only EKF1 that drives the car (configs B and C).
+#   Code: src/1_robot_localization (ekf_node, C++), node `ekf1`, started by launch/stage1_sim.launch.py.
+#   This file: what is fused + Q. Compare with 1B / 1C: tools/compare_vdot_ekfs.py.
+#
+# Dynamics: 2D omnidirectional, CONSTANT ACCELERATION, no control input (use_control off):
+#   x'  = x + (vx cos yaw - vy sin yaw) dt + 1/2 (ax cos yaw - ay sin yaw) dt^2   (y' likewise)
+#   yaw' = yaw + vyaw dt     vx' = vx + ax dt     vy' = vy + ay dt
+#   vyaw' = vyaw (constant yaw rate)     ax' = ax, ay' = ay (random walks, set by Q)
+# States: 15 (x y z roll pitch yaw vx vy vz vroll vpitch vyaw ax ay az). two_d_mode pins the 3D ones,
+#   leaving 8: x, y, yaw, vx, vy, vyaw, ax, ay  (frame odom, rear axle). ax is never measured: it is
+#   inferred from the trend of the speed updates through the vx-ax correlation.
+# Sensors (every message used; queued, processed in stamp order on a 50 Hz timer; messages older than
+#   the filter time are DROPPED because smooth_lagged_data is off):
+#   /prep/wheel_twist  50 Hz  vx = wheel speed, vy = 0 pseudo-measurement (rear axle does not slide)
+#   /prep/imu         100 Hz  vyaw = gyro z
+# Inputs: none. Steering and the speed command are NOT used.
+# Output: /ekf1/odometry + TF odom->base_link, 50 Hz, stamped at the last measurement (a gyro stamp).
+# R: each message's covariance, written by sensor_prep (config/prep.yaml; in sim the realism level's
+#   `assumed:` block). Q: process_noise_covariance below, x the level's assumed.q_scale (1 at L1).
+# =====================================================================================================
+# EKF1 = robot_localization ekf_node (plan section 9.3). YOU fill in the TODOs.
+# A working version is in ~/1_sim_ws/reference_solutions/ekf1_rl_SOLUTION.yaml (try first!).
+#
+# R (sensor noise) is NOT set here: robot_localization reads it from each message's covariance,
+# which sensor_prep writes. This file decides WHAT gets fused and the process noise Q.
+# The launch file multiplies process_noise_covariance by the realism level's assumed.q_scale.
+#
+# Docs: https://docs.ros.org/en/jazzy/p/robot_localization/  (state estimation nodes, parameters)
+#       and the commented template 1_robot_localization/params/ekf.yaml
+ekf1:
+  ros__parameters:
+    frequency: 50.0
+    sensor_timeout: 0.1
+    # TODO: the car drives on a plane. Which robot_localization option makes it ignore z, roll, pitch?
+    two_d_mode: True
+    publish_tf: false                      # CAR: vesc_to_odom already broadcasts odom -> base_link (vesc.yaml publish_tf true)
+    print_diagnostics: true
+    map_frame: map
+    odom_frame: odom
+    base_link_frame: base_link             # car
+    world_frame: odom
+
+    # Order of every *_config: x, y, z, roll, pitch, yaw, 
+    #                          vx, vy, vz, vroll, vpitch, vyaw, 
+    #                          ax, ay, az
+    twist0: /prep/wheel_twist
+    # TODO: which entries does the wheel-speed message really measure? (sensor_prep writes vx = wheel
+    #       speed and vy = 0 as a "the rear axle does not slide" pseudo-measurement)
+    twist0_config: [false, false, false, false, false, false,
+                    true, true, false, false, false, false,
+                    false, false, false]
+
+    twist0_queue_size: 10
+
+    imu0: /prep/imu
+    # TODO: which ONE entry should come from the gyro? (do not fuse IMU orientation)
+    imu0_config:   [false, false, false, false, false, false,
+                    false, false, false, false, false, True,
+                    false, false, false]
+    imu0_queue_size: 10
+    imu0_remove_gravitational_acceleration: false
+
+    # TODO: process noise Q (variance per second, diagonal only, same 15-entry order as above).
+    #       The package default assumes a slow robot. This car changes speed by ~0.05 m/s and yaw
+    #       rate by ~0.02 rad/s every 10 ms with the slip MPC: Q must cover that (see
+    #       LEARNING_NOTES.md note 24). Tune by replaying a bag: scripts/replay_ekf1.sh.
+    #
+    # Q per second = (change per step)^2 / step time   (random walk: variances add, so they grow with dt)
+    #   vx:   (0.05 m/s)^2   / 0.01 s = 0.25     -> tuned x4 = 1.0
+    #   vyaw: (0.02 rad/s)^2 / 0.01 s = 0.04     -> tuned x4 = 0.16
+    # The x4 came from bag replay (results/20261114_204039_OL_L1_slip_k08_shadow, results/compare_ekf1_shadow):
+    # 0.05 / 0.02 are TYPICAL changes, the peaks are bigger. x4 cut yaw-rate RMS 0.136 -> 0.059 rad/s
+    # and speed RMS 0.180 -> 0.148 m/s.
+    # Pose (x, y, yaw) is never measured here: its Q only sets how fast the reported pose covariance
+    # grows, so it stays small. z, roll, pitch and their rates are irrelevant with two_d_mode (tiny).
+    # vy is held near 0 by the "rear axle does not slide" pseudo-measurement.
+    #
+    # ax, ay are NOT fused, but they are still states: robot_localization predicts v' = v + ax dt, and
+    # infers ax from the trend in the speed updates. Same rule as above, applied to acceleration:
+    #   ax: the slip MPC swings from +9 to -6 m/s^2 in ~0.1-0.2 s -> ~0.2 m/s^2 per 10 ms -> 0.2^2/0.01 = 4.0
+    #   ay: v*omega changes by ~7 m/s^2 over ~0.3 s             -> ~0.1 m/s^2 per 10 ms -> 0.1^2/0.01 = 1.0
+    # With ax = ay = 0.01 the acceleration estimate lagged, the speed prediction overshot at every
+    # throttle/brake change, and in config C the MPC chattered (3 wall contacts per minute; v rms 0.16).
+    # Open-loop bag replays did NOT show this: only a live closed-loop run did (results/bisect*_C_L1).
+    #                           x       y       z       roll    pitch   yaw
+    process_noise_covariance: [1.0e-3, 1.0e-3, 1.0e-6, 1.0e-6, 1.0e-6, 1.0e-3,
+    #                           vx      vy      vz      vroll   vpitch  vyaw
+                               1.0,    1.0e-2, 1.0e-6, 1.0e-6, 1.0e-6, 0.16,
+    #                           ax      ay      az
+                               4.0,    1.0,    1.0e-6]
+
+    initial_estimate_covariance: [1.0e-6, 1.0e-6, 1.0e-6, 1.0e-6, 1.0e-6, 1.0e-6,
+                                  1.0e-2, 1.0e-2, 1.0e-6, 1.0e-6, 1.0e-6, 1.0e-2,
+                                  4.0,    1.0,    1.0e-6]

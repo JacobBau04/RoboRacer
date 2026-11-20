@@ -1,0 +1,34 @@
+# Particle filter in scan mode for estimators 1A/1B (motion prior = 1A's /ekf1/odometry).
+# estimation_launch.py adds initial_pose. The race estimator uses particle_filter's own localize.yaml instead.
+/**:
+  ros__parameters:
+    scan_topic: /scan
+    odometry_topic: /ekf1/odometry
+    update_trigger: scan
+    base_to_laser_x: 0.27     # static TF base_link -> laser in sick_bringup_launch.py
+    angle_step: 18            # 811 SICK beams -> 46 rays
+    max_particles: 4000       # lower (e.g. 2000) if the CPU budget (step 1.5) needs it
+    squash_factor: 2.2
+    viz: 1
+    max_viz_particles: 60
+    range_method: cddt        # = the race PF on the car (rm: ~45 ms per update on the Jetson, 2026-11-18); no CUDA for rmgpu
+    theta_discretization: 112
+    max_range: 15.0
+    fine_timing: 0
+    publish_odom: 1
+    z_short: 0.01
+    z_max: 0.07
+    z_rand: 0.12
+    z_hit: 0.75
+    sigma_hit: 8.0
+    motion_dispersion_x: 0.05
+    motion_dispersion_y: 0.025
+    motion_dispersion_theta: 0.25
+    rangelib_variant: 2
+    publish_tf: false         # map -> odom comes from state_assembler; base_link -> laser from bringup
+    map_frame: map
+    laser_frame: laser
+    map_service: /map_server/map
+    initial_pose_std: [0.3, 0.3, 0.1]
+    scan_wait_timeout: 0.1
+    odom_buffer_seconds: 2.0

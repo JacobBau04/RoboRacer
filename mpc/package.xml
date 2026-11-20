@@ -22,6 +22,7 @@
   <depend>ament_index_python</depend>
   <depend>visualization_msgs</depend>
   <depend>tf2</depend>
+  <exec_depend>state_estimation</exec_depend>
   <depend>eigen</depend>
   <depend>tf2_ros</depend>
 

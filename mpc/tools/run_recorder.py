@@ -67,6 +67,11 @@ PLATFORMS = {
     'sim': {'pose': '/ego_racecar/odom',
             'extra': ['/ego_racecar/collision', '/ego_racecar/lap_time']},
 }
+# Car raw inputs for offline estimator replays (1A/1B/1C can be re-run on any run's bag)
+RAW_ESTIMATION_TOPICS = ['/sensors/imu/raw', '/sensors/servo_position_command', '/commands/motor/speed']
+# Extra topics recorded when the MPC drives on a stage 1 estimator (state_estimation package: 1A, 1B)
+STAGE1_TOPICS = ['/state_estimate', '/state_estimate/latency', '/ekf1/odometry', '/prep/wheel_twist', '/prep/imu',
+                 '/prep/steering', '/shadow_ekf1/odometry', '/shadow_ekf1/diagnostics']
 SOLVE_FIELDS = 17   # numbers per /mpc/solve_stats message (mpc_node.publish_stats)
 AVOID_FIELDS = 13   # numbers per /obstacle_avoidance/stats message (obstacle_avoidance_node.py)
 VESC_FIELDS = ('erpm', 'current_motor', 'current_input', 'voltage_input', 'duty_cycle')
@@ -394,10 +399,18 @@ def main():
     parser.add_argument('--note', default='', help='free text saved with the run')
     parser.add_argument('--keep-bag', default='false',
                         help='true = keep the rosbag (~20 MB per 100 s) next to the results')
+    parser.add_argument('--estimator', default='race',
+                        help='state estimator the MPC drives on (state_estimation package); not race = also '
+                             'record the stage 1 topics')
     args = parser.parse_args()
 
     meta = collect_metadata(args.track, args.note, args.platform)
     topics = [PLATFORMS[args.platform]['pose'], *COMMON_TOPICS, *PLATFORMS[args.platform]['extra']]
+    meta['estimator'] = args.estimator
+    if args.platform == 'real':
+        topics += RAW_ESTIMATION_TOPICS
+        if args.estimator != 'race':
+            topics += STAGE1_TOPICS
     for w in meta['warnings']:
         print(f'[run_recorder] WARNING: {w}', flush=True)
     run_dir = DATA_DIR / meta['run']
