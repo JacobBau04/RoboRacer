@@ -20,7 +20,7 @@ The map is particle_filter's localize.yaml `map` (one setting for every estimato
 """
 # TODO (Jacob): think about implementing the commanded steering angle into the dynamics model or measurement for
 # EKF_1. Would this be helpful? (race uses it through /odom; 1A doesn't use it; 1B uses it in its yaw model)
-ESTIMATOR = 'race'   # race | 1A | 1B | 1C | 2A   <- the one setting to change
+ESTIMATOR = '1A'   # race | 1A | 1B | 1C | 2A   <- the one setting to change
 
 import os
 

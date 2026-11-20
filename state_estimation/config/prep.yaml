@@ -7,7 +7,7 @@ sensor_prep:
     imu_in: /sensors/imu/raw
     servo_in: /sensors/servo_position_command
     base_frame: base_link
-    speed_scale: 1.0              # kept 1.0 on purpose: tape test (2026-11-17) says /odom reads 5.9 % high (1.059), but the MPC commands use the same -4363.1 scale; apply 1.059 offline when scoring
+    speed_scale: 1.0              # /odom is already true speed: vesc.yaml speed_to_erpm_gain -4621 (tape test, active since 2026-11-18)
     sigma_v: 0.025                # m/s: OL1 (2026-11-18) 1B speed NIS 0.02 at 0.05, innovation std 0.028 m/s; at rest the VESC reports exactly 0
     low_speed: 0.5
     low_speed_inflation: 4.0

@@ -493,6 +493,16 @@ def main():
         traceback.print_exc()
         print(f'[run_recorder] analysis failed; raw data is safe. Retry with:\n'
               f'  python3 {Path(__file__).with_name("run_analysis.py")} {run_dir}', flush=True)
+    if meta.get('platform') == 'real':
+        # report.png (+ the all-runs summary grouped by estimator) in a detached process, so it survives the
+        # launch shutting down; it needs ~1 min for the scans
+        try:
+            import run_report
+            run_report.start_in_background(run_dir)
+            print(f'[run_recorder] report.png and data/estimator_summary.png are being made in the background '
+                  f'(log: {run_dir / "report.log"})', flush=True)
+        except Exception:
+            traceback.print_exc()
 
 
 if __name__ == '__main__':
