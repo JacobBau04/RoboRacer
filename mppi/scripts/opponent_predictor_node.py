@@ -81,8 +81,8 @@ class OpponentPredictorNode(Node):
             'frame_id': 'map',
             'pose_source': 'odom_pose',
             'tf_lookup_timeout': 0.02,
-            'prediction_steps': 5,
-            'prediction_dt': 0.1,
+            'prediction_steps': 20,
+            'prediction_dt': 0.05,
             'publish_rate_hz': 20.0,
             'stale_timeout': 0.5,
             'max_stale_prediction_time': 2.0,  # Kept for compatibility; original timer doesn't use it.

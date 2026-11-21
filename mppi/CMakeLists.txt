@@ -28,11 +28,20 @@ endforeach()
 # Install Python modules
 ament_python_install_package(${PROJECT_NAME})
 
-# Install Python executables
 install(PROGRAMS
   scripts/mppi_node.py
-  scripts/utils.py
+  scripts/mppi_utils.py
+  scripts/infer_env.py
+  scripts/opponent_predictor_node.py
   DESTINATION lib/${PROJECT_NAME}
+)
+
+install(DIRECTORY scripts/utils/
+  DESTINATION lib/${PROJECT_NAME}/utils
+)
+
+install(DIRECTORY scripts/dynamics_models/
+  DESTINATION lib/${PROJECT_NAME}/dynamics_models
 )
 
 # ==========================================

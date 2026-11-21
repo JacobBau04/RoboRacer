@@ -10,7 +10,7 @@ import rclpy
 from ackermann_msgs.msg import AckermannDriveStamped
 from rclpy.node import Node
 from rclpy.executors import ExternalShutdownException
-from utils import calc_interpolated_ref_trajectory
+from mppi_utils import calc_interpolated_ref_trajectory
 from sensor_msgs.msg import LaserScan
 from nav_msgs.msg import Odometry
 from nav_msgs.msg import Path
@@ -18,6 +18,7 @@ import os
 from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import PoseStamped
 from infer_env import InferEnv, load_wall_distance_field
+from rclpy.qos import qos_profile_sensor_data
 
 class WallEnv(InferEnv):
     def __init__(self, map_yaml):
@@ -33,7 +34,7 @@ class MPPIConfig:
     NX: int = 4  # length of state vector: x = [p_x, p_y, yaw, v]
     NU: int = 2  # length of input vector: u = [a, delta]
     T: int = 1024  # number of sampled control sequences
-    H: int = 50  # horizon length
+    H: int = 20  # horizon length
     DT: float = 0.05  # time step [s]
     INTEGRATOR: str = "euler"  # "euler" or "rk4" (bonus)
 
@@ -47,19 +48,22 @@ class MPPIConfig:
     MIN_ACCEL: float = -3.0  # minimum acceleration [m/ss]
     MAX_ACCEL: float = 3.0  # maximum acceleration [m/ss]
     MIN_SPEED: float = 0.0  # minimum speed [m/s]
-    MAX_SPEED: float = 6.0  # maximum speed [m/s]
-    TRACK_DEVIATION_PENALTY = 0.2
-    HEADING_PENALTY = 0.2
-    OBSTACLE_AVOIDANCE_PENALTY = 0.5
-    WALL_AVOIDANCE_PENALTY = 0.5
-    ACCELLERATION_PENALTY = 0.05
-    STEERING_ANGLE_PENALTY = 0.05
-    VELOCITY_PENALTY = 5.0
-    CAR_RADIUS = 0.20
-    WALL_BUBBLE = 0.05
-    OPPONENT_BUBBLE = 0.2
-    PROGRESS_PENALTY = 500
+    MAX_SPEED: float = 3.0  # maximum speed [m/s]
+    TRACK_DEVIATION_PENALTY = 1.0
+    HEADING_PENALTY = 1.0
 
+    WALL_AVOIDANCE_PENALTY = 150.0
+    OPPONENT_AVOIDANCE_PENALTY = 100.0
+
+    ACCELLERATION_PENALTY = 0.5
+    STEERING_ANGLE_PENALTY = 0.5
+    VELOCITY_PENALTY = 0.5
+
+    CAR_RADIUS = 0.20
+    WALL_BUBBLE = 0.35
+    OPPONENT_BUBBLE = 0.4
+
+    PROGRESS_PENALTY = 50.0
 
 def dynamics(x, u, cfg):
     """
@@ -268,7 +272,7 @@ def cost(X, U, ref, cfg,opponent_xy,wall_env,debug=False):
             wall_distances = wall_env.sample_wall_distance(X[1:, :2])
 
             clearance_violation = jnp.maximum(
-                cfg.WALL_BUBBLE - wall_distances,
+                cfg.CAR_RADIUS + cfg.WALL_BUBBLE - wall_distances,
                 0.0
                     )
             
@@ -325,7 +329,7 @@ def cost(X, U, ref, cfg,opponent_xy,wall_env,debug=False):
 
     heading_cost = heading_error(X, ref) * cfg.HEADING_PENALTY
 
-    opponent_cost = opponent_avoidance(X, opponent_xy) * cfg.OBSTACLE_AVOIDANCE_PENALTY
+    opponent_cost = opponent_avoidance(X, opponent_xy,cfg) * cfg.OPPONENT_AVOIDANCE_PENALTY
 
     wall_cost = wall_avoidance(X,wall_env,cfg) * cfg.WALL_AVOIDANCE_PENALTY
 
@@ -364,8 +368,8 @@ def cost(X, U, ref, cfg,opponent_xy,wall_env,debug=False):
     return cost_array
 
 
-@partial(jax.jit, static_argnames=("cfg",))
-def mppi_step(key, U, x0, ref, cfg,obstacle_list=None):
+@partial(jax.jit, static_argnames=("cfg", "wall_env"))
+def mppi_step(key, U, x0, ref, cfg, opponent_xy, wall_env):
     """
     One MPPI update (README Section IV)
     :param key: JAX random key, a new one at every call
@@ -399,8 +403,8 @@ def mppi_step(key, U, x0, ref, cfg,obstacle_list=None):
     #         (vectorize cost() with jax.vmap), then the cost-to-go
     #         S[k, t] = c[k, t] + ... + c[k, H-1] (cumsum of the reversed steps)
 
-    cost_vectorized= jax.vmap(cost,in_axes=(0,0,None,None,None))
-    S_array = cost_vectorized(all_trajectories,sampled_controls,ref,cfg,obstacle_list)
+    cost_vectorized= jax.vmap(cost,in_axes=(0,0,None,None,None,None))
+    S_array = cost_vectorized(all_trajectories,sampled_controls,ref,cfg,opponent_xy,wall_env)
     cost_to_go = jnp.flip(jnp.cumsum(jnp.flip(S_array, axis=1), axis=1),axis=1)
     
     # TODO 4. Weight: for each step t, normalize S[:, t] to [0, 1] over the
@@ -427,42 +431,69 @@ class MPPI(Node):
     def __init__(self):
         super().__init__('mppi_node')
         # launch/levine_launch.py sets track:=levine, launch/spielberg_launch.py track:=spielberg
-        self.declare_parameter('track', 'levine')
-        track = self.get_parameter('track').value
+        self.declare_parameter('wall_map_yaml', '')
+        self.declare_parameter('waypoint_path', '')
 
         # TODO: create ROS subscribers and publishers
         #       use MPPI as a tracker (similar to pure pursuit)
 
         self.pose_sub_ = self.create_subscription(Odometry, '/ego_racecar/odom', self.odom_callback, 1)
-        self.scan_sub_ = self.create_subscription(LaserScan, '/scan', self.scan_callback, 1)
         self.drive_pub_ = self.create_publisher(AckermannDriveStamped, '/drive', 1)
         self.path_pub_ = self.create_publisher(Path, '/mppi/selected_path', 10)
-        self.opponent_sub_ = self.create_subscription(Path,'/opponent/predicted_path',self.opponent_callback,1)
+        self.opponent_sub_ = self.create_subscription(Path,'/opponent/predicted_path',self.opponent_callback,qos_profile_sensor_data)
         # TODO: load the waypoints of `track` from the package's installed waypoints/ folder:
         #       os.path.join(get_package_share_directory('mppi'), 'waypoints', <your csv>)
         #       (ament_index_python.packages). A path like /home/you/... only exists on your laptop.
-        map_yaml = os.path.join(
-            get_package_share_directory('mppi_bringup'),
-            'maps',
-            track + '.yaml'
-        )
+
+        self.declare_parameter('track', 'levine')
+        track = self.get_parameter('track').value
+
+        
+        map_yaml = self.get_parameter('wall_map_yaml').value
+        csv_path = self.get_parameter('waypoint_path').value
+
+        if not map_yaml:
+            map_yaml = os.path.join(
+                get_package_share_directory('mppi_bringup'),
+                'maps',
+                track + '.yaml'
+            )
+
+        if not csv_path:
+            csv_path = os.path.join(
+                get_package_share_directory('mppi'),
+                'waypoints',
+                track + '.csv'
+            )
 
         self.wall_env = WallEnv(map_yaml)
-        csv_path = os.path.join(
-        get_package_share_directory('mppi'),
-        'waypoints',
-        track + '.csv')
 
-        self.waypoints = np.loadtxt(
-            csv_path,
-            delimiter=',',
-            skiprows=1
-        )
+        if os.path.basename(csv_path) == 'lev_blocked.csv':
 
-        self.ref_x = self.waypoints[:, 0].copy()
-        self.ref_y = self.waypoints[:, 1].copy()
-        self.ref_yaw = self.waypoints[:, 2].copy()
-        self.ref_v = self.waypoints[:, 3].copy()
+            self.waypoints = np.loadtxt(
+                csv_path,
+                delimiter=';',
+                comments='#'
+            )
+
+            self.ref_x = self.waypoints[:, 1].copy()
+            self.ref_y = self.waypoints[:, 2].copy()
+            self.ref_yaw = self.waypoints[:, 3].copy()
+            self.ref_v = self.waypoints[:, 5].copy()
+
+        else:
+
+            self.waypoints = np.loadtxt(
+                csv_path,
+                delimiter=',',
+                skiprows=1
+            )
+
+            self.ref_x = self.waypoints[:, 0].copy()
+            self.ref_y = self.waypoints[:, 1].copy()
+            self.ref_yaw = self.waypoints[:, 2].copy()
+            self.ref_v = self.waypoints[:, 3].copy()
+       
 
         self.yaw = None
         self.car_x = None
@@ -471,9 +502,9 @@ class MPPI(Node):
         self.config = MPPIConfig()
         self.U = jnp.zeros((self.config.H, self.config.NU))  # mean control sequence
         self.key = jax.random.PRNGKey(0)
-        self.opponent_xy = None
-
-        dummy_obstacles = jnp.full((200, 2), 1000.0)
+        self.opponent_xy = jnp.full((self.config.H, 2),1000.0)
+        self.opponent_path_time = None
+        self.opponent_timeout = 0.5
 
         mppi_step(
             self.key,
@@ -481,15 +512,48 @@ class MPPI(Node):
             jnp.zeros(self.config.NX),
             jnp.zeros((self.config.H + 1, self.config.NX)),
             self.config,
-            dummy_obstacles
+            self.opponent_xy,
+            self.wall_env
         )
 
         
     def opponent_callback(self, msg):
-        self.opponent_xy = jnp.array([
+        if len(msg.poses) == 0:
+            self.opponent_path_time = None
+            return
+
+        points = np.array([
             [pose.pose.position.x, pose.pose.position.y]
             for pose in msg.poses
-        ])        
+        ], dtype=np.float32).reshape(-1, 2)
+
+        if len(points) < 2:
+            self.opponent_path_time = None
+            return
+
+        if not np.isfinite(points).all():
+            self.opponent_path_time = None
+            return
+
+        predicted = points[1:]
+
+        if len(predicted) >= self.config.H:
+            predicted = predicted[:self.config.H]
+
+        else:
+            padding = np.repeat(
+                predicted[-1:],
+                self.config.H - len(predicted),
+                axis=0
+            )
+
+            predicted = np.vstack((predicted, padding))
+
+        self.opponent_xy = jnp.asarray(predicted)
+
+        self.opponent_path_time = (
+            self.get_clock().now().nanoseconds * 1e-9
+        )  
 
     def publish_drive(self, speed, steering):
         msg = AckermannDriveStamped()
@@ -513,6 +577,10 @@ class MPPI(Node):
                                     1 - 2 * (quaternion[1]**2 + quaternion[2]**2))
                 
         vehicle_state = jnp.array([self.car_x, self.car_y, self.yaw, odom_msg.twist.twist.linear.x])
+
+        if not np.isfinite(np.asarray(vehicle_state)).all():
+            self.publish_drive(0.0, 0.0)
+            return
 
         # TODO: Calculate the reference trajectory for the next H steps
                 #       with the current vehicle state.
@@ -548,50 +616,57 @@ class MPPI(Node):
 
         # a new random key at every step, so MPPI draws new samples
         self.key, subkey = jax.random.split(self.key)
+        now = self.get_clock().now().nanoseconds * 1e-9
+
+        opponent_active = (
+            self.opponent_path_time is not None
+            and 0.0 <= now - self.opponent_path_time <= self.opponent_timeout
+        )
+
+        opponent_xy = (
+            self.opponent_xy
+            if opponent_active
+            else jnp.full((self.config.H, 2), 1000.0)
+        )
         # TODO: run MPPI, keep the new mean control sequence in self.U
 
-        if self.wall_list is not None and len(self.wall_list)>0:
-            self.U = mppi_step(subkey,self.U,vehicle_state,ref_path,self.config,self.opponent_xy,self.wall_list,self.opponent_list)
-            selected_trajectory = simulate(
+        self.U = mppi_step(subkey,self.U,vehicle_state,ref_path,self.config,opponent_xy,self.wall_env)
+        selected_trajectory = simulate(
                 vehicle_state,
                 self.U,
                 self.config
             )
 
-            path_msg = Path()
-            path_msg.header.stamp = self.get_clock().now().to_msg()
-            path_msg.header.frame_id = "map"
+        path_msg = Path()
+        path_msg.header.stamp = self.get_clock().now().to_msg()
+        path_msg.header.frame_id = "map"
 
-            for state in np.asarray(selected_trajectory):
-                pose = PoseStamped()
-                pose.header = path_msg.header
+        for state in np.asarray(selected_trajectory):
+            pose = PoseStamped()
+            pose.header = path_msg.header
 
-                pose.pose.position.x = float(state[0])
-                pose.pose.position.y = float(state[1])
-                pose.pose.position.z = 0.0
+            pose.pose.position.x = float(state[0])
+            pose.pose.position.y = float(state[1])
+            pose.pose.position.z = 0.0
 
-                yaw = float(state[2])
-                pose.pose.orientation.z = float(np.sin(yaw / 2))
-                pose.pose.orientation.w = float(np.cos(yaw / 2))
+            yaw = float(state[2])
+            pose.pose.orientation.z = float(np.sin(yaw / 2))
+            pose.pose.orientation.w = float(np.cos(yaw / 2))
 
-                path_msg.poses.append(pose)
+            path_msg.poses.append(pose)
 
-            self.path_pub_.publish(path_msg)
+        self.path_pub_.publish(path_msg)
 
-            selected_cost = cost(
+        selected_cost = cost(
                 selected_trajectory,
                 self.U,
                 ref_path,
                 self.config,
-                self.wall_list,
-                debug=True
-            )
-        else: 
-            self.publish_drive(0.0,0.0)
-            return
-
-        # TODO: publish drive message: steering delta_0, speed v + a_0 * DT
-        #       (float() turns a JAX array into a number)
+                opponent_xy,
+                self.wall_env,
+                debug=True)
+      
+    
 
         steer_output = self.U[0,1]
         
@@ -602,10 +677,6 @@ class MPPI(Node):
         )
 
         self.publish_drive(speed_output, steer_output)
-
-        # TODO (optional, debugging only): visualize the reference, the trajectory
-        #       of self.U and a few sampled trajectories, colored by their weight
-        pass
 
     def calc_ref_trajectory(self, x0, cx, cy, cyaw, cv):
         """
@@ -650,13 +721,17 @@ RACE 3
 - At each step test if it is better than the last implementation - Ablation study
 1. Validate basic obstacle avoidance with arclength progress - DONE
 2. Grab cedric's opponent locator code and opponent predictor code - DONE
-3. Implement Cedric's v1 opponent passing code with just bubble cost -TODO
+3. Implement Cedric's v1 opponent passing code with just bubble cost -DONE
 4. Need to adjust all of this code to be able to deal with multiple cars - TODO
 --------------------------------------------------------------------------------------
 
 PROJECT EXTENSION
 5. Use gaussian sampling to generate many opponent trajectores (can use EKF or not but need some kind of sampling)
    ---Kalman filter can be used to make better predicted trajectories, gaussian will probably work fine though.
+
+   OR
+
+   Create an observed opp raceline which we build after one lap for a better estimation of opp raceline. We then converge to it.
 
 6. Bias MPPI samples based on opponent trajectory using saved last opponent trajectory. Start with generating
 MPPI samples and then for every future car state. Look at previous calculate opponent trajectorie(s) and then bias
