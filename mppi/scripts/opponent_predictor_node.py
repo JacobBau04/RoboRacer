@@ -81,7 +81,7 @@ class OpponentPredictorNode(Node):
             'frame_id': 'map',
             'pose_source': 'odom_pose',
             'tf_lookup_timeout': 0.02,
-            'prediction_steps': 20,
+            'prediction_steps': 40,
             'prediction_dt': 0.05,
             'publish_rate_hz': 20.0,
             'stale_timeout': 0.5,

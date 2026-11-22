@@ -34,35 +34,43 @@ class MPPIConfig:
     NX: int = 4  # length of state vector: x = [p_x, p_y, yaw, v]
     NU: int = 2  # length of input vector: u = [a, delta]
     T: int = 1024  # number of sampled control sequences
-    H: int = 20  # horizon length
+    H: int = 40  # horizon length
     DT: float = 0.05  # time step [s]
     INTEGRATOR: str = "euler"  # "euler" or "rk4" (bonus)
 
     # ---------------------------------------------------
     # TODO: you may need to tune the following parameters
     LAMBDA: float = 0.01  # temperature
-    U_STD: tuple = (1.0, 0.25)  # std of the sampled inputs [a, delta]
+    U_STD: tuple = (1.0, 0.35)  # std of the sampled inputs [a, delta]
     WB: float = 0.33  # Wheelbase [m]
     MIN_STEER: float = -0.4189  # minimum steering angle [rad]
     MAX_STEER: float = 0.4189  # maximum steering angle [rad]
     MIN_ACCEL: float = -3.0  # minimum acceleration [m/ss]
     MAX_ACCEL: float = 3.0  # maximum acceleration [m/ss]
     MIN_SPEED: float = 0.0  # minimum speed [m/s]
-    MAX_SPEED: float = 3.0  # maximum speed [m/s]
-    TRACK_DEVIATION_PENALTY = 0.5
-    HEADING_PENALTY = 1.0
+    MAX_SPEED: float = 3.5  # maximum speed [m/s]
 
-    WALL_AVOIDANCE_PENALTY = 500.0
-    OPPONENT_AVOIDANCE_PENALTY = 150.0
 
-    ACCELLERATION_PENALTY = 0.5
-    STEERING_ANGLE_PENALTY = 0.25
-    VELOCITY_PENALTY = 0.1
+    # Tracking
+    TRACK_DEVIATION_PENALTY = 0.0
+    HEADING_PENALTY = 0.5
 
-    CAR_RADIUS = 0.20
-    WALL_BUBBLE = 0.30
-    OPPONENT_BUBBLE = 0.40
-    PROGRESS_PENALTY = 50.0
+    # Collision avoidance
+    WALL_AVOIDANCE_PENALTY = 800.0
+    OPPONENT_AVOIDANCE_PENALTY = 500
+
+    # Control smoothness
+    ACCELLERATION_PENALTY = 0.1
+    STEERING_ANGLE_PENALTY = 0.1
+
+    # Driving behavior
+    VELOCITY_PENALTY = 1.0
+    PROGRESS_PENALTY = 80.0
+
+
+    CAR_RADIUS = 0.16
+    WALL_BUBBLE = 0.32
+    OPPONENT_BUBBLE = 0.37
 
 def dynamics(x, u, cfg):
     """
@@ -290,7 +298,7 @@ def cost(X, U, ref, cfg,opponent_xy,wall_env,debug=False):
         )
 
         clearance_violation = jnp.maximum(
-            cfg.OPPONENT_BUBBLE - distances,
+            cfg.CAR_RADIUS + cfg.OPPONENT_BUBBLE - distances,
             0.0
         )
 
@@ -629,12 +637,32 @@ class MPPI(Node):
         )
         # TODO: run MPPI, keep the new mean control sequence in self.U
 
+        print(f"OPPONENT FIRST POSITION: {np.asarray(opponent_xy[0])}")
+
         self.U = mppi_step(subkey,self.U,vehicle_state,ref_path,self.config,opponent_xy,self.wall_env)
         selected_trajectory = simulate(
                 vehicle_state,
                 self.U,
                 self.config
             )
+
+
+        ego_xy = np.asarray(selected_trajectory[1:, :2])
+        opp_xy = np.asarray(opponent_xy)
+
+        print("\nTIMESTEP | EGO X,Y | OPPONENT X,Y | DISTANCE")
+
+        for i in range(0, min(len(ego_xy), len(opp_xy)), 10):
+            distance = np.linalg.norm(ego_xy[i] - opp_xy[i])
+
+            print(
+                f"{i:3d} | "
+                f"{ego_xy[i]} | "
+                f"{opp_xy[i]} | "
+                f"{distance:.3f} m"
+            )
+
+        
 
         path_msg = Path()
         path_msg.header.stamp = self.get_clock().now().to_msg()
