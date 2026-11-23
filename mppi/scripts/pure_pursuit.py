@@ -18,7 +18,7 @@ class OpponentPurePursuit(Node):
 
         self.lookahead = 0.8
         self.wheelbase = 0.33
-        self.speed = 1.5
+        self.speed = 0.5
 
         bringup = get_package_share_directory('mppi_bringup')
         csv_path = os.path.join(

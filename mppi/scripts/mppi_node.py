@@ -57,7 +57,7 @@ class MPPIConfig:
     MIN_ACCEL: float = -3.0  # minimum acceleration [m/ss]
     MAX_ACCEL: float = 3.0  # maximum acceleration [m/ss]
     MIN_SPEED: float = 0.0  # minimum speed [m/s]
-    MAX_SPEED: float = 2.0  # maximum speed [m/s]
+    MAX_SPEED: float = 3.5  # maximum speed [m/s]
 
 
     
@@ -818,7 +818,7 @@ class MPPI(Node):
         self.key = jax.random.PRNGKey(0)
         self.opponent_xy = jnp.full((self.config.H, 2),1000.0)
         self.opponent_path_time = None
-        self.opponent_timeout = 1.0
+        self.opponent_timeout = 2.0
 
         mppi_step(
             self.key,
@@ -964,7 +964,7 @@ class MPPI(Node):
 
         now = time.monotonic()
 
-        if now - self.last_snapshot_time >= 4.0 and not self.snapshot_busy:
+        if now - self.last_snapshot_time >= 1.0 and not self.snapshot_busy:
 
             self.last_snapshot_time = now
             self.snapshot_busy = True
