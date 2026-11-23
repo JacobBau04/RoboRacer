@@ -81,8 +81,8 @@ class OpponentPredictorNode(Node):
             'frame_id': 'map',
             'pose_source': 'odom_pose',
             'tf_lookup_timeout': 0.02,
-            'prediction_steps': 40,
-            'prediction_dt': 0.05,
+            'prediction_steps': 20,
+            'prediction_dt': 0.1,
             'publish_rate_hz': 20.0,
             'stale_timeout': 0.5,
             'max_stale_prediction_time': 2.0,  # Kept for compatibility; original timer doesn't use it.
@@ -582,6 +582,18 @@ class OpponentPredictorNode(Node):
             ps.pose.orientation = yaw_quaternion(p.yaw)
             path.poses.append(ps)
         self.path_pub.publish(path)
+        print("\nPREDICTED OPPONENT TRAJECTORY")
+
+        for i, p in enumerate(prediction[1:], start=1):
+
+            print(
+                f"Step {i:2d} | "
+                f"Time: {i*self.prediction_dt:.2f}s | "
+                f"X: {p.x:.3f} | "
+                f"Y: {p.y:.3f} | "
+                f"Yaw: {p.yaw:.3f} | "
+                f"Speed: {p.speed:.3f}"
+            )
 
         markers = MarkerArray()
         erase = Marker()
@@ -612,6 +624,27 @@ class OpponentPredictorNode(Node):
         dots.color.b = 0.0 if stale else 1.0
         dots.points = [self._point(p, 0.1) for p in prediction]
         markers.markers.append(dots)
+        # Visualize each predicted timestep
+        for i, p in enumerate(prediction[1:], start=1):
+
+            marker = self._marker(
+                Marker.TEXT_VIEW_FACING,
+                100 + i,
+                stamp
+            )
+
+            marker.pose.position = self._point(p, 0.35)
+
+            marker.scale.z = 0.18
+
+            marker.color.a = 1.0
+            marker.color.r = 1.0
+            marker.color.g = 1.0
+            marker.color.b = 1.0
+
+            marker.text = f"{i}"
+
+            markers.markers.append(marker)
         label = self._marker(Marker.TEXT_VIEW_FACING, 3, stamp)
         label.pose.position = self._point(current, 0.7)
         label.scale.z = 0.22

@@ -19,6 +19,15 @@ from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import PoseStamped
 from infer_env import InferEnv, load_wall_distance_field
 from rclpy.qos import qos_profile_sensor_data
+from std_msgs.msg import Float32MultiArray
+from visualization_msgs.msg import Marker, MarkerArray
+from geometry_msgs.msg import Point
+import time
+import threading
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from matplotlib.collections import LineCollection
 
 class WallEnv(InferEnv):
     def __init__(self, map_yaml):
@@ -33,44 +42,45 @@ class MPPIConfig:
     # frozen so jax.jit can take it as a static argument: use tuples, not arrays
     NX: int = 4  # length of state vector: x = [p_x, p_y, yaw, v]
     NU: int = 2  # length of input vector: u = [a, delta]
-    T: int = 1024  # number of sampled control sequences
-    H: int = 40  # horizon length
-    DT: float = 0.05  # time step [s]
+    T: int = 4096 # number of sampled control sequences
+    H: int = 20  # horizon length
+    DT: float = 0.1  # time step [s]
     INTEGRATOR: str = "euler"  # "euler" or "rk4" (bonus)
 
     # ---------------------------------------------------
     # TODO: you may need to tune the following parameters
-    LAMBDA: float = 0.01  # temperature
-    U_STD: tuple = (1.0, 0.35)  # std of the sampled inputs [a, delta]
+    LAMBDA: float = 0.05  # temperature
+    U_STD: tuple = (1.0, 0.5)  # std of the sampled inputs [a, delta]
     WB: float = 0.33  # Wheelbase [m]
     MIN_STEER: float = -0.4189  # minimum steering angle [rad]
     MAX_STEER: float = 0.4189  # maximum steering angle [rad]
     MIN_ACCEL: float = -3.0  # minimum acceleration [m/ss]
     MAX_ACCEL: float = 3.0  # maximum acceleration [m/ss]
     MIN_SPEED: float = 0.0  # minimum speed [m/s]
-    MAX_SPEED: float = 3.5  # maximum speed [m/s]
+    MAX_SPEED: float = 2.0  # maximum speed [m/s]
 
 
+    
     # Tracking
-    TRACK_DEVIATION_PENALTY = 0.0
+    TRACK_DEVIATION_PENALTY = 0.25
     HEADING_PENALTY = 0.5
+    VELOCITY_PENALTY = 1
 
     # Collision avoidance
-    WALL_AVOIDANCE_PENALTY = 800.0
-    OPPONENT_AVOIDANCE_PENALTY = 500
+    WALL_AVOIDANCE_PENALTY = 500.0
+    OPPONENT_AVOIDANCE_PENALTY = 600.0
 
     # Control smoothness
     ACCELLERATION_PENALTY = 0.1
     STEERING_ANGLE_PENALTY = 0.1
 
-    # Driving behavior
-    VELOCITY_PENALTY = 1.0
-    PROGRESS_PENALTY = 80.0
+    # Progress
+    PROGRESS_PENALTY = 0
 
-
+    # Clearance
     CAR_RADIUS = 0.16
-    WALL_BUBBLE = 0.32
-    OPPONENT_BUBBLE = 0.37
+    WALL_BUBBLE = 0.1
+    OPPONENT_BUBBLE = 0.3
 
 def dynamics(x, u, cfg):
     """
@@ -151,7 +161,8 @@ def rollout(x0, U, cfg):
     return rollout_trajectories
 
 
-def cost(X, U, ref, cfg,opponent_xy,wall_env,debug=False):
+def cost(X, U, ref, cfg, opponent_xy, wall_env,
+         debug=False, return_components=False):
     """
     Cost of each step of one trajectory (README Section III.a): c[t] is the cost
     of applying u_t and reaching x_{t+1}
@@ -359,18 +370,18 @@ def cost(X, U, ref, cfg,opponent_xy,wall_env,debug=False):
         + progress_cost
     )
 
-    if debug:
-        print(
-            f"TRACK: {float(jnp.sum(track_cost)):.2f} | "
-            f"HEADING: {float(jnp.sum(heading_cost)):.2f} | "
-            f"Opponent: {float(jnp.sum(opponent_cost)):.2f} | "
-            f"Wall: {float(jnp.sum(wall_cost)):.2f} | "
-            f"ACCEL: {float(jnp.sum(accel_cost)):.2f} | "
-            f"STEERING: {float(jnp.sum(steering_cost)):.2f} | "
-            f"VELOCITY: {float(jnp.sum(velocity_cost)):.2f} | "
-            f"PROGRESS: {float(jnp.sum(progress_cost)):.2f} | "
-            f"TOTAL: {float(jnp.sum(cost_array)):.2f}"
-        )
+    if return_components:
+        return {
+            "Track": jnp.sum(track_cost),
+            "Heading": jnp.sum(heading_cost),
+            "Opponent": jnp.sum(opponent_cost),
+            "Wall": jnp.sum(wall_cost),
+            "Acceleration": jnp.sum(accel_cost),
+            "Steering": jnp.sum(steering_cost),
+            "Velocity": jnp.sum(velocity_cost),
+            "Progress": jnp.sum(progress_cost),
+            "TOTAL": jnp.sum(cost_array)
+        }
 
     return cost_array
 
@@ -427,8 +438,282 @@ def mppi_step(key, U, x0, ref, cfg, opponent_xy, wall_env):
     # --------------------------------------------------------
     update = jnp.sum(weights[:, :, None] * sampled_controls, axis=0)
 
-    return update
+    return update, all_trajectories, cost_to_go[:, 0], sampled_controls
 
+def save_trajectory_snapshot(
+    paths, costs, selected, ref, opponent,
+    wall_sdf, wall_origin, wall_resolution, filename,
+    best_breakdown, selected_breakdown
+):
+    fig, ax = plt.subplots(figsize=(10, 9))
+
+    costs = np.asarray(costs)
+    paths = np.asarray(paths)
+
+    # ----------------------------------------
+    # 1. WALLS FROM THE ACTUAL MPPI DISTANCE FIELD
+    # ----------------------------------------
+
+    sdf = np.asarray(wall_sdf)
+    origin = np.asarray(wall_origin)
+    resolution = float(wall_resolution)
+
+    # Show a region around the ego car
+    cx, cy = selected[0, :2]
+    radius = 3.5
+
+    xmin, xmax = cx - radius, cx + radius
+    ymin, ymax = cy - radius, cy + radius
+
+    # Convert world coordinates to SDF grid indices
+    c0 = max(0, int((xmin - origin[0]) / resolution))
+    c1 = min(sdf.shape[1], int((xmax - origin[0]) / resolution) + 1)
+
+    r0 = max(0, int((ymin - origin[1]) / resolution))
+    r1 = min(sdf.shape[0], int((ymax - origin[1]) / resolution) + 1)
+
+    local_sdf = sdf[r0:r1, c0:c1]
+
+    if local_sdf.shape[0] > 1 and local_sdf.shape[1] > 1:
+
+        xs = origin[0] + (
+            np.arange(c0, c1) + 0.5
+        ) * resolution
+
+        ys = origin[1] + (
+            np.arange(r0, r1) + 0.5
+        ) * resolution
+
+        # Wall boundary, approximated from the distance field
+        if np.min(local_sdf) <= resolution <= np.max(local_sdf):
+            ax.contour(
+                xs,
+                ys,
+                local_sdf,
+                levels=[resolution],
+                colors="black",
+                linewidths=2.5,
+                zorder=3
+            )
+
+    # ----------------------------------------
+    # 2. COST-WEIGHTED TRAJECTORIES
+    # ----------------------------------------
+
+    low = np.percentile(costs, 5)
+    high = np.percentile(costs, 95)
+
+    normalized = np.clip(
+        (costs - low) / (high - low + 1e-6),
+        0.0,
+        1.0
+    )
+
+    cmap = plt.get_cmap("RdYlGn_r")
+
+    colors = cmap(normalized)
+
+    # All samples visible, but faint
+    colors[:, 3] = 0.10
+
+    widths = 0.2 + 0.8 * (1.0 - normalized)
+
+    lines = LineCollection(
+        paths[:, :, :2],
+        colors=colors,
+        linewidths=widths,
+        zorder=2
+    )
+
+    ax.add_collection(lines)
+
+    # Highlight the lowest-cost 5%
+    best_mask = costs <= low
+
+    best_colors = cmap(normalized[best_mask])
+    best_colors[:, 3] = 0.75
+
+    best_lines = LineCollection(
+        paths[best_mask, :, :2],
+        colors=best_colors,
+        linewidths=2.0,
+        zorder=4
+    )
+
+    ax.add_collection(best_lines)
+
+    # Colorbar showing actual cost values
+    from matplotlib.colors import Normalize
+    from matplotlib.cm import ScalarMappable
+
+    norm = Normalize(vmin=low, vmax=high)
+
+    sm = ScalarMappable(norm=norm, cmap=cmap)
+    sm.set_array([])
+
+    fig.colorbar(
+        sm,
+        ax=ax,
+        label="Total MPPI trajectory cost (5th–95th percentile)",
+        shrink=0.75
+    )
+
+    # ----------------------------------------
+    # 3. REFERENCE AND SELECTED TRAJECTORIES
+    # ----------------------------------------
+
+    ax.plot(
+        ref[:, 0],
+        ref[:, 1],
+        "k--",
+        linewidth=2,
+        label="Reference",
+        zorder=5
+    )
+
+    ax.plot(
+        selected[:, 0],
+        selected[:, 1],
+        color="blue",
+        linewidth=3,
+        label="Selected MPPI",
+        zorder=6
+    )
+
+    # ----------------------------------------
+    # 4. OPPONENT
+    # ----------------------------------------
+
+    if np.isfinite(opponent).all() and np.max(np.abs(opponent)) < 100:
+
+        ax.plot(
+            opponent[:, 0],
+            opponent[:, 1],
+            color="magenta",
+            linestyle="--",
+            linewidth=2.5,
+            label="Opponent prediction",
+            zorder=7
+        )
+
+        ax.scatter(
+            opponent[0, 0],
+            opponent[0, 1],
+            color="magenta",
+            s=150,
+            marker="X",
+            label="Opponent",
+            zorder=8
+        )
+
+        ax.add_patch(
+            plt.Circle(
+                opponent[0, :2],
+                0.4,
+                color="magenta",
+                alpha=0.15,
+                zorder=3
+            )
+        )
+
+    # ----------------------------------------
+    # 5. EGO POSITION
+    # ----------------------------------------
+
+    ax.scatter(
+        cx,
+        cy,
+        color="black",
+        s=120,
+        zorder=9,
+        label="Ego"
+    )
+
+    # ----------------------------------------
+    # 6. PLOT SETTINGS
+    # ----------------------------------------
+
+    ax.set_xlim(xmin, xmax)
+    ax.set_ylim(ymin, ymax)
+
+    ax.set_aspect("equal")
+    ax.set_xlabel("X (m)")
+    ax.set_ylabel("Y (m)")
+
+    ax.set_title(
+        f"MPPI Trajectory Costs\n"
+        f"Minimum: {np.min(costs):.2f} | "
+        f"Median: {np.median(costs):.2f} | "
+        f"Maximum: {np.max(costs):.2f}"
+    )
+
+    ax.legend(loc="upper left")
+    ax.grid(True, alpha=0.2)
+
+    cost_text = "COST BREAKDOWN\n"
+    cost_text += f"{'Component':<14} {'Best':>9} {'Selected':>10}\n"
+    cost_text += "-" * 37 + "\n"
+
+    for name in best_breakdown:
+        cost_text += (
+            f"{name:<14} "
+            f"{best_breakdown[name]:>9.2f} "
+            f"{selected_breakdown[name]:>10.2f}\n"
+        )
+
+    fig.text(
+    0.76, 0.55,
+    cost_text,
+    fontsize=10,
+    family="monospace",
+    verticalalignment="center",
+    bbox=dict(facecolor="white", edgecolor="black", alpha=0.95)
+)
+
+    fig.set_size_inches(16, 9)
+    fig.subplots_adjust(left=0.06, right=0.57)
+
+        # Numbered timesteps for selected MPPI trajectory
+    for i, (x, y) in enumerate(selected[1:, :2], start=1):
+        ax.annotate(
+            str(i),
+            (x, y),
+            xytext=(0, -14),
+            textcoords="offset points",
+            ha="center",
+            fontsize=7,
+            color="blue",
+            bbox=dict(
+                boxstyle="circle,pad=0.2",
+                facecolor="white",
+                edgecolor="blue",
+                alpha=0.9
+            ),
+            zorder=15
+        )
+
+    # Numbered timesteps for opponent prediction
+    if np.isfinite(opponent).all() and np.max(np.abs(opponent)) < 100:
+        for i, (x, y) in enumerate(opponent, start=1):
+            ax.annotate(
+                str(i),
+                (x, y),
+                xytext=(0, 14),
+                textcoords="offset points",
+                ha="center",
+                fontsize=7,
+                color="magenta",
+                bbox=dict(
+                    boxstyle="circle,pad=0.2",
+                    facecolor="white",
+                    edgecolor="magenta",
+                    alpha=0.9
+                ),
+                zorder=15
+            )
+
+    fig.savefig(filename, dpi=150)
+    plt.close(fig)
 
 class MPPI(Node):
     """
@@ -444,10 +729,28 @@ class MPPI(Node):
         # TODO: create ROS subscribers and publishers
         #       use MPPI as a tracker (similar to pure pursuit)
 
+        self.last_snapshot_time = 0.0
+        self.snapshot_busy = False
+
+        self.snapshot_dir = os.path.join(os.path.expanduser("~/roboracer_ws/src/RoboRacer"),"mppi_debug")
+
+        os.makedirs(self.snapshot_dir, exist_ok=True)
+
         self.pose_sub_ = self.create_subscription(Odometry, '/ego_racecar/odom', self.odom_callback, 1)
         self.drive_pub_ = self.create_publisher(AckermannDriveStamped, '/drive', 1)
         self.path_pub_ = self.create_publisher(Path, '/mppi/selected_path', 10)
         self.opponent_sub_ = self.create_subscription(Path,'/opponent/predicted_path',self.opponent_callback,qos_profile_sensor_data)
+        self.wall_distance_pub_ = self.create_publisher(
+            Float32MultiArray,
+            '/mppi/wall_distances',
+            10
+        )
+
+        self.wall_debug_pub_ = self.create_publisher(
+            MarkerArray,
+            '/mppi/wall_debug',
+            10
+        )
         # TODO: load the waypoints of `track` from the package's installed waypoints/ folder:
         #       os.path.join(get_package_share_directory('mppi'), 'waypoints', <your csv>)
         #       (ament_index_python.packages). A path like /home/you/... only exists on your laptop.
@@ -474,6 +777,10 @@ class MPPI(Node):
             )
 
         self.wall_env = WallEnv(map_yaml)
+
+        self.wall_sdf_np = np.asarray(self.wall_env.wall_sdf)
+        self.wall_origin_np = np.asarray(self.wall_env.wall_origin)
+        self.wall_resolution = self.wall_env.wall_resolution
 
         if os.path.basename(csv_path) == 'lev_blocked.csv':
 
@@ -511,7 +818,7 @@ class MPPI(Node):
         self.key = jax.random.PRNGKey(0)
         self.opponent_xy = jnp.full((self.config.H, 2),1000.0)
         self.opponent_path_time = None
-        self.opponent_timeout = 0.5
+        self.opponent_timeout = 1.0
 
         mppi_step(
             self.key,
@@ -639,24 +946,120 @@ class MPPI(Node):
 
         print(f"OPPONENT FIRST POSITION: {np.asarray(opponent_xy[0])}")
 
-        self.U = mppi_step(subkey,self.U,vehicle_state,ref_path,self.config,opponent_xy,self.wall_env)
+        self.U, sampled_paths, sampled_costs, sampled_controls = mppi_step(
+            subkey,
+            self.U,
+            vehicle_state,
+            ref_path,
+            self.config,
+            opponent_xy,
+            self.wall_env
+        )
+
         selected_trajectory = simulate(
-                vehicle_state,
-                self.U,
-                self.config
+            vehicle_state,
+            self.U,
+            self.config
+        )
+
+        now = time.monotonic()
+
+        if now - self.last_snapshot_time >= 4.0 and not self.snapshot_busy:
+
+            self.last_snapshot_time = now
+            self.snapshot_busy = True
+
+            paths = np.asarray(sampled_paths)
+            costs = np.asarray(sampled_costs)
+            selected = np.asarray(selected_trajectory)
+            reference = np.asarray(ref_path)
+            opponent = np.asarray(opponent_xy)
+
+            best_idx = int(np.argmin(costs))
+
+            best_breakdown = cost(
+                sampled_paths[best_idx],
+                sampled_controls[best_idx],
+                ref_path,
+                self.config,
+                opponent_xy,
+                self.wall_env,
+                return_components=True
             )
 
+            selected_breakdown = cost(
+                selected_trajectory,
+                self.U,
+                ref_path,
+                self.config,
+                opponent_xy,
+                self.wall_env,
+                return_components=True
+            )
+
+            best_breakdown = {
+                k: float(v) for k, v in best_breakdown.items()
+            }
+
+            selected_breakdown = {
+                k: float(v) for k, v in selected_breakdown.items()
+            }
+
+            filename = os.path.join(
+                self.snapshot_dir,
+                f"snapshot_{int(time.time() * 1000)}.png"
+            )
+
+            def save_image():
+                try:
+                    save_trajectory_snapshot(
+                    paths,
+                    costs,
+                    selected,
+                    reference,
+                    opponent,
+                    self.wall_sdf_np,
+                    self.wall_origin_np,
+                    self.wall_resolution,
+                    filename,
+                    best_breakdown,
+                    selected_breakdown
+                )
+                    print(f"SNAPSHOT SAVED: {filename}")
+                except Exception as e:
+                    print(f"SNAPSHOT ERROR: {e}")
+                finally:
+                    self.snapshot_busy = False
+
+            threading.Thread(
+                target=save_image,
+                daemon=True
+            ).start()
+
+        wall_distances = np.asarray(self.wall_env.sample_wall_distance(selected_trajectory[1:, :2]))
+
+        print("\nTIMESTEP | DISTANCE TO WALL")
+
+        for i, distance in enumerate(wall_distances):
+            print(f"{i+1:3d} | {distance:.3f} m")
+
+        msg = Float32MultiArray()
+        msg.data = wall_distances.tolist()
+
+        self.wall_distance_pub_.publish(msg)
 
         ego_xy = np.asarray(selected_trajectory[1:, :2])
         opp_xy = np.asarray(opponent_xy)
 
-        print("\nTIMESTEP | EGO X,Y | OPPONENT X,Y | DISTANCE")
+        print("\nTIMESTEP | TIME | EGO X,Y | OPPONENT X,Y | DISTANCE")
 
-        for i in range(0, min(len(ego_xy), len(opp_xy)), 10):
+        for i in range(min(len(ego_xy), len(opp_xy))):
+
             distance = np.linalg.norm(ego_xy[i] - opp_xy[i])
 
             print(
-                f"{i:3d} | "
+                f"{i+1:3d} | "
+                f"{(i+1)*self.config.DT:.2f}s | "
                 f"{ego_xy[i]} | "
                 f"{opp_xy[i]} | "
                 f"{distance:.3f} m"
@@ -748,7 +1151,7 @@ RACE 3
 - At each step test if it is better than the last implementation - Ablation study
 1. Validate basic obstacle avoidance with arclength progress - DONE
 2. Grab cedric's opponent locator code and opponent predictor code - DONE
-3. Implement Cedric's v1 opponent passing code with just bubble cost -DONE
+3. Implement Cedric's v1 opponent passing code with just bubble cost -TODO
 4. Need to adjust all of this code to be able to deal with multiple cars - TODO
 --------------------------------------------------------------------------------------
 
