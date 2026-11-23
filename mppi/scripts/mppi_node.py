@@ -45,7 +45,7 @@ class MPPIConfig:
     T: int = 4096 # number of sampled control sequences
     H: int = 20  # horizon length
     DT: float = 0.1  # time step [s]
-    INTEGRATOR: str = "euler"  # "euler" or "rk4" (bonus)
+    INTEGRATOR: str = "rk4"  # "euler" or "rk4" (bonus)
 
     # ---------------------------------------------------
     # TODO: you may need to tune the following parameters
@@ -57,7 +57,7 @@ class MPPIConfig:
     MIN_ACCEL: float = -3.0  # minimum acceleration [m/ss]
     MAX_ACCEL: float = 3.0  # maximum acceleration [m/ss]
     MIN_SPEED: float = 0.0  # minimum speed [m/s]
-    MAX_SPEED: float = 3.5  # maximum speed [m/s]
+    MAX_SPEED: float = 2.5  # maximum speed [m/s]
 
 
     
@@ -67,8 +67,8 @@ class MPPIConfig:
     VELOCITY_PENALTY = 1
 
     # Collision avoidance
-    WALL_AVOIDANCE_PENALTY = 500.0
-    OPPONENT_AVOIDANCE_PENALTY = 600.0
+    WALL_AVOIDANCE_PENALTY = 600.0
+    OPPONENT_AVOIDANCE_PENALTY = 450.0
 
     # Control smoothness
     ACCELLERATION_PENALTY = 0.1
@@ -79,7 +79,7 @@ class MPPIConfig:
 
     # Clearance
     CAR_RADIUS = 0.16
-    WALL_BUBBLE = 0.1
+    WALL_BUBBLE = 0.15
     OPPONENT_BUBBLE = 0.3
 
 def dynamics(x, u, cfg):
@@ -115,11 +115,22 @@ def step_euler(x, u, cfg):
 
 def step_rk4(x, u, cfg):
     """
-    Bonus: Runge-Kutta 4 step (README Section II.b.ii)
-    :return: next state, shape (NX,)
+    def step_rk4(x, u, cfg):
     """
-    # TODO: fill in the RK4 step
-    pass
+    dt = cfg.DT
+
+    k1 = dynamics(x, u, cfg)
+    k2 = dynamics(x + 0.5 * dt * k1, u, cfg)
+    k3 = dynamics(x + 0.5 * dt * k2, u, cfg)
+    k4 = dynamics(x + dt * k3, u, cfg)
+
+    x_next = x + (dt / 6.0) * (k1 + 2.0*k2 + 2.0*k3 + k4)
+
+    # Enforce velocity limits
+    velocity = jnp.clip(x_next[3], cfg.MIN_SPEED, cfg.MAX_SPEED)
+    x_next = x_next.at[3].set(velocity)
+
+    return x_next
 
 
 def step(x, u, cfg):
@@ -813,6 +824,7 @@ class MPPI(Node):
         self.car_x = None
         self.car_y = None
 
+        self.take_snapshots = False
         self.config = MPPIConfig()
         self.U = jnp.zeros((self.config.H, self.config.NU))  # mean control sequence
         self.key = jax.random.PRNGKey(0)
@@ -964,7 +976,7 @@ class MPPI(Node):
 
         now = time.monotonic()
 
-        if now - self.last_snapshot_time >= 1.0 and not self.snapshot_busy:
+        if self.take_snapshots and now - self.last_snapshot_time >= 1.0 and not self.snapshot_busy:
 
             self.last_snapshot_time = now
             self.snapshot_busy = True
