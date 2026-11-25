@@ -23,6 +23,9 @@ from std_msgs.msg import Float32MultiArray
 from visualization_msgs.msg import Marker, MarkerArray
 from geometry_msgs.msg import Point
 import time
+import math
+from collections import deque
+from rcl_interfaces.msg import ParameterDescriptor
 import threading
 import matplotlib
 matplotlib.use("Agg")
@@ -50,14 +53,16 @@ class MPPIConfig:
     # ---------------------------------------------------
     # TODO: you may need to tune the following parameters
     LAMBDA: float = 0.05  # temperature
-    U_STD: tuple = (1.0, 0.5)  # std of the sampled inputs [a, delta]
+    U_STD: tuple = (1.0, 0.15)  # std of the sampled inputs [a, delta] (car: steer was 0.5, wider than the
+    # +-0.38 limit, so ~45% of samples sat at full lock; on the narrow levine_2nd hallways it lost the line
+    # after 9 m in a closed-loop sim, with 0.15 it tracked 10.8 cm mean, 2026-11-24)
     WB: float = 0.33  # Wheelbase [m]
-    MIN_STEER: float = -0.4189  # minimum steering angle [rad]
-    MAX_STEER: float = 0.4189  # maximum steering angle [rad]
+    MIN_STEER: float = -0.38  # minimum steering angle [rad] (car: was -0.4189; the MPC raced with 0.38)
+    MAX_STEER: float = 0.38  # maximum steering angle [rad] (car: was 0.4189)
     MIN_ACCEL: float = -3.0  # minimum acceleration [m/ss]
     MAX_ACCEL: float = 3.0  # maximum acceleration [m/ss]
     MIN_SPEED: float = 0.0  # minimum speed [m/s]
-    MAX_SPEED: float = 2.5  # maximum speed [m/s]
+    MAX_SPEED: float = 2.5  # maximum speed [m/s] (car first run: was 2.5; levine_race asks 2.1-2.3)
 
 
     
@@ -153,8 +158,13 @@ def simulate(x0, U, cfg):
         x_next = step(x, u, cfg)
         return x_next, x_next
 
-    _, trajectories = jax.lax.scan(f, x0, U)  
+    _, trajectories = jax.lax.scan(f, x0, U)
     return jnp.vstack((x0, trajectories))
+
+
+# car: compiled once. Called outside jit, simulate's lax.scan was re-traced and re-compiled on every
+# pose (~250 ms of a ~300 ms callback on the Jetson CPU, measured 2026-11-24). Same result.
+simulate_jit = jax.jit(simulate, static_argnames=("cfg",))
 
 
 def rollout(x0, U, cfg):
@@ -737,6 +747,21 @@ class MPPI(Node):
         self.declare_parameter('wall_map_yaml', '')
         self.declare_parameter('waypoint_path', '')
 
+        # ---- car settings, ported from the RoboRacer MPC (defaults 0 = sim behaviour unchanged) ----
+        # dynamic_typing: a 0 from a launch file arrives as an int
+        # The particle-filter pose is the LiDAR, pose_offset m ahead of the rear axle (0.27 on the car);
+        # the bicycle model is for the rear axle.
+        self.declare_parameter('pose_offset', 0.0, ParameterDescriptor(dynamic_typing=True))
+        self.pose_offset = float(self.get_parameter('pose_offset').value)
+        # Steering command -> turn in the pose takes ~0.20 s on the car (TUNING_LOG R2: without
+        # compensation the MPC weaved at 0.6 Hz). Each solve starts from the measured state moved
+        # forward by delay_comp s, replaying the commands already sent in that window.
+        self.declare_parameter('delay_comp', 0.0, ParameterDescriptor(dynamic_typing=True))
+        self.delay_comp = float(self.get_parameter('delay_comp').value)
+        self.cmd_hist = deque()   # (time.monotonic(), speed, steer) of each sent /drive
+        self.get_logger().info(f'pose_offset {self.pose_offset:.3f} m, delay_comp {self.delay_comp:.3f} s'
+                               + (' (off)' if self.delay_comp <= 0 else ''))
+
         # TODO: create ROS subscribers and publishers
         #       use MPPI as a tracker (similar to pure pursuit)
 
@@ -886,6 +911,37 @@ class MPPI(Node):
         msg.drive.speed = float(speed)
         msg.drive.steering_angle = float(steering)
         self.drive_pub_.publish(msg)
+        # every command the car actually got, for predict_delay
+        self.cmd_hist.append((time.monotonic(), float(speed), float(steering)))
+
+    def predict_delay(self, x, y, yaw, v, now):
+        """Move the measured state forward by delay_comp seconds (kinematic bicycle, speed
+        held constant). Ported unchanged from the RoboRacer MPC (mpc_node.py predict_delay).
+
+        delay_comp = pose delay d_pose + actuation delay d_act. The pose shows the car at
+        now - d_pose, and the command sent now acts from now + d_act. In between, the car
+        is steered by the commands sent during the last delay_comp seconds (a command sent
+        at time c acts from c + d_act), so replaying those in order gives the state at the
+        moment the new command starts acting. Only the total delay matters."""
+        tau = self.delay_comp
+        hist = self.cmd_hist
+        # keep the newest command sent at or before now - tau (active at the start), drop older
+        while len(hist) > 1 and hist[1][0] <= now - tau:
+            hist.popleft()
+        if tau <= 0 or not hist:
+            return x, y, yaw
+        n = max(1, int(round(tau / 0.01)))           # 10 ms Euler steps
+        dt = tau / n
+        i = 0
+        for k in range(n):
+            ts = now - tau + k * dt
+            while i + 1 < len(hist) and hist[i + 1][0] <= ts:
+                i += 1
+            steer = hist[i][2] if hist[i][0] <= ts else 0.0   # nothing sent yet: straight
+            x += v * math.cos(yaw) * dt
+            y += v * math.sin(yaw) * dt
+            yaw += v * math.tan(steer) / self.config.WB * dt
+        return x, y, yaw
 
     def odom_callback(self, odom_msg):
         # TODO: extract the state x0 = [p_x, p_y, yaw, v] from the ROS msg
@@ -901,8 +957,18 @@ class MPPI(Node):
                                             odom_msg.pose.pose.orientation.w])
         self.yaw = np.arctan2(2 * (quaternion[3] * quaternion[2] + quaternion[0] * quaternion[1]),
                                     1 - 2 * (quaternion[1]**2 + quaternion[2]**2))
-                
-        vehicle_state = jnp.array([self.car_x, self.car_y, self.yaw, odom_msg.twist.twist.linear.x])
+
+        # car: particle-filter pose is the LiDAR, pose_offset m ahead of the rear axle (no-op if 0)
+        self.car_x -= self.pose_offset * np.cos(self.yaw)
+        self.car_y -= self.pose_offset * np.sin(self.yaw)
+        v_meas = odom_msg.twist.twist.linear.x
+        # car: where the car will be when this command takes effect (no-op if delay_comp = 0).
+        # The reference path, the MPPI start state and the speed command all use this state;
+        # speed is held at the measured value.
+        x_pred, y_pred, yaw_pred = self.predict_delay(
+            float(self.car_x), float(self.car_y), float(self.yaw), v_meas, time.monotonic())
+
+        vehicle_state = jnp.array([x_pred, y_pred, yaw_pred, v_meas])
 
         if not np.isfinite(np.asarray(vehicle_state)).all():
             self.publish_drive(0.0, 0.0)
@@ -968,7 +1034,7 @@ class MPPI(Node):
             self.wall_env
         )
 
-        selected_trajectory = simulate(
+        selected_trajectory = simulate_jit(
             vehicle_state,
             self.U,
             self.config
@@ -1099,14 +1165,15 @@ class MPPI(Node):
 
         self.path_pub_.publish(path_msg)
 
-        selected_cost = cost(
-                selected_trajectory,
-                self.U,
-                ref_path,
-                self.config,
-                opponent_xy,
-                self.wall_env,
-                debug=True)
+        # car: commented out, the result was never used and the uncompiled call took ~21 ms per pose
+        # selected_cost = cost(
+        #         selected_trajectory,
+        #         self.U,
+        #         ref_path,
+        #         self.config,
+        #         opponent_xy,
+        #         self.wall_env,
+        #         debug=True)
       
     
 
