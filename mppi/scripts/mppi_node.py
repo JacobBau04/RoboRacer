@@ -72,7 +72,7 @@ class MPPIConfig:
     VELOCITY_PENALTY = 1
 
     # Collision avoidance
-    WALL_AVOIDANCE_PENALTY = 850.0
+    WALL_AVOIDANCE_PENALTY = 600.0
 
     OPPONENT_AVOIDANCE_PENALTY = 450.0
 
@@ -313,15 +313,14 @@ def cost(X, U, ref, cfg, opponent_xy_0,opponent_xy_1,opponent_xy_2, wall_env,
             """
             wall_distances = wall_env.sample_wall_distance(X[1:, :2])
 
-            soft_clearance = jnp.maximum(cfg.SOFT_WALL_BUBBLE - wall_distances,0.0)
-
             clearance_violation = jnp.maximum(
                 cfg.CAR_RADIUS + cfg.WALL_BUBBLE - wall_distances,
                 0.0
                     )
             
-            return clearance_violation ** 2 + cfg.SOFT_WALL_AVOIDANCE_PENALTY * soft_clearance **2
+            return clearance_violation ** 2 
 
+    
     def opponent_avoidance(X, opponent_xy_0,opponent_xy_1,opponent_xy_2,cfg):
         """
         Lazy Implementation. Does not use Gaussians - Needs Updates
