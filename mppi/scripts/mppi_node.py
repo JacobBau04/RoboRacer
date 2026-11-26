@@ -45,7 +45,7 @@ class MPPIConfig:
     # frozen so jax.jit can take it as a static argument: use tuples, not arrays
     NX: int = 4  # length of state vector: x = [p_x, p_y, yaw, v]
     NU: int = 2  # length of input vector: u = [a, delta]
-    T: int = 4096 # number of sampled control sequences
+    T: int = 1024 # number of sampled control sequences
     H: int = 20  # horizon length
     DT: float = 0.1  # time step [s]
     INTEGRATOR: str = "rk4"  # "euler" or "rk4" (bonus)
@@ -53,7 +53,7 @@ class MPPIConfig:
     # ---------------------------------------------------
     # TODO: you may need to tune the following parameters
     LAMBDA: float = 0.05  # temperature
-    U_STD: tuple = (1.0, 0.15)  # std of the sampled inputs [a, delta] (car: steer was 0.5, wider than the
+    U_STD: tuple = (1.0, 0.25)  # std of the sampled inputs [a, delta] (car: steer was 0.5, wider than the
     # +-0.38 limit, so ~45% of samples sat at full lock; on the narrow levine_2nd hallways it lost the line
     # after 9 m in a closed-loop sim, with 0.15 it tracked 10.8 cm mean, 2026-11-24)
     WB: float = 0.33  # Wheelbase [m]
@@ -68,11 +68,12 @@ class MPPIConfig:
     
     # Tracking
     TRACK_DEVIATION_PENALTY = 0.25
-    HEADING_PENALTY = 0.5
+    HEADING_PENALTY = 0.2
     VELOCITY_PENALTY = 1
 
     # Collision avoidance
-    WALL_AVOIDANCE_PENALTY = 600.0
+    WALL_AVOIDANCE_PENALTY = 850.0
+
     OPPONENT_AVOIDANCE_PENALTY = 450.0
 
     # Control smoothness
@@ -84,7 +85,9 @@ class MPPIConfig:
 
     # Clearance
     CAR_RADIUS = 0.16
-    WALL_BUBBLE = 0.15
+    WALL_BUBBLE = 0.2
+    SOFT_WALL_BUBBLE = 0.6
+    SOFT_WALL_AVOIDANCE_PENALTY = 0.05
     OPPONENT_BUBBLE = 0.3
 
 def dynamics(x, u, cfg):
@@ -182,7 +185,7 @@ def rollout(x0, U, cfg):
     return rollout_trajectories
 
 
-def cost(X, U, ref, cfg, opponent_xy, wall_env,
+def cost(X, U, ref, cfg, opponent_xy_0,opponent_xy_1,opponent_xy_2, wall_env,
          debug=False, return_components=False):
     """
     Cost of each step of one trajectory (README Section III.a): c[t] is the cost
@@ -310,31 +313,51 @@ def cost(X, U, ref, cfg, opponent_xy, wall_env,
             """
             wall_distances = wall_env.sample_wall_distance(X[1:, :2])
 
+            soft_clearance = jnp.maximum(cfg.SOFT_WALL_BUBBLE - wall_distances,0.0)
+
             clearance_violation = jnp.maximum(
                 cfg.CAR_RADIUS + cfg.WALL_BUBBLE - wall_distances,
                 0.0
                     )
             
-            return clearance_violation ** 2
+            return clearance_violation ** 2 + cfg.SOFT_WALL_AVOIDANCE_PENALTY * soft_clearance **2
 
-    def opponent_avoidance(X, opponent_xy, cfg):
+    def opponent_avoidance(X, opponent_xy_0,opponent_xy_1,opponent_xy_2,cfg):
         """
         Lazy Implementation. Does not use Gaussians - Needs Updates
         """
 
         ego_xy = X[1:, :2]
 
-        distances = jnp.linalg.norm(
-            ego_xy - opponent_xy,
+        distances_0 = jnp.linalg.norm(
+            ego_xy - opponent_xy_0,
             axis=1
         )
 
-        clearance_violation = jnp.maximum(
-            cfg.CAR_RADIUS + cfg.OPPONENT_BUBBLE - distances,
-            0.0
+        distances_1 = jnp.linalg.norm(
+            ego_xy - opponent_xy_1,
+            axis=1
         )
 
-        return clearance_violation ** 2
+        distances_2 = jnp.linalg.norm(
+                    ego_xy - opponent_xy_2,
+                    axis=1
+                )
+        
+
+        clearance_violation_0 = jnp.maximum(
+            cfg.CAR_RADIUS + cfg.OPPONENT_BUBBLE - distances_0,
+            0.0
+        )
+        clearance_violation_1 = jnp.maximum(
+                    cfg.CAR_RADIUS + cfg.OPPONENT_BUBBLE - distances_1,
+                    0.0)
+        clearance_violation_2 = jnp.maximum(
+                            cfg.CAR_RADIUS + cfg.OPPONENT_BUBBLE - distances_2,
+                            0.0)
+        
+
+        return (clearance_violation_0 ** 2) + (clearance_violation_1 **2) + (clearance_violation_2 **2)
 
     def accelleration_delta(U):
         """
@@ -368,7 +391,7 @@ def cost(X, U, ref, cfg, opponent_xy, wall_env,
 
     heading_cost = heading_error(X, ref) * cfg.HEADING_PENALTY
 
-    opponent_cost = opponent_avoidance(X, opponent_xy,cfg) * cfg.OPPONENT_AVOIDANCE_PENALTY
+    opponent_cost = opponent_avoidance(X, opponent_xy_0,opponent_xy_1,opponent_xy_2,cfg) * cfg.OPPONENT_AVOIDANCE_PENALTY
 
     wall_cost = wall_avoidance(X,wall_env,cfg) * cfg.WALL_AVOIDANCE_PENALTY
 
@@ -408,7 +431,7 @@ def cost(X, U, ref, cfg, opponent_xy, wall_env,
 
 
 @partial(jax.jit, static_argnames=("cfg", "wall_env"))
-def mppi_step(key, U, x0, ref, cfg, opponent_xy, wall_env):
+def mppi_step(key, U, x0, ref, cfg, opponent_xy_0,opponent_xy_1,opponent_xy_2, wall_env):
     """
     One MPPI update (README Section IV)
     :param key: JAX random key, a new one at every call
@@ -442,8 +465,8 @@ def mppi_step(key, U, x0, ref, cfg, opponent_xy, wall_env):
     #         (vectorize cost() with jax.vmap), then the cost-to-go
     #         S[k, t] = c[k, t] + ... + c[k, H-1] (cumsum of the reversed steps)
 
-    cost_vectorized= jax.vmap(cost,in_axes=(0,0,None,None,None,None))
-    S_array = cost_vectorized(all_trajectories,sampled_controls,ref,cfg,opponent_xy,wall_env)
+    cost_vectorized = jax.vmap(cost,in_axes=(0, 0, None, None, None, None, None, None))
+    S_array = cost_vectorized(all_trajectories,sampled_controls,ref,cfg,opponent_xy_0,opponent_xy_1,opponent_xy_2,wall_env)
     cost_to_go = jnp.flip(jnp.cumsum(jnp.flip(S_array, axis=1), axis=1),axis=1)
     
     # TODO 4. Weight: for each step t, normalize S[:, t] to [0, 1] over the
@@ -462,7 +485,8 @@ def mppi_step(key, U, x0, ref, cfg, opponent_xy, wall_env):
     return update, all_trajectories, cost_to_go[:, 0], sampled_controls
 
 def save_trajectory_snapshot(
-    paths, costs, selected, ref, opponent,
+    paths, costs, selected, ref,
+    opponent_0, opponent_1, opponent_2,
     wall_sdf, wall_origin, wall_resolution, filename,
     best_breakdown, selected_breakdown
 ):
@@ -605,35 +629,40 @@ def save_trajectory_snapshot(
     # 4. OPPONENT
     # ----------------------------------------
 
-    if np.isfinite(opponent).all() and np.max(np.abs(opponent)) < 100:
+    opponents = [opponent_0, opponent_1, opponent_2]
+    colors = ["magenta", "orange", "cyan"]
+
+    for idx, (opponent, color) in enumerate(zip(opponents, colors)):
+
+        if not np.isfinite(opponent).all() or np.max(np.abs(opponent)) >= 100:
+            continue
 
         ax.plot(
-            opponent[:, 0],
-            opponent[:, 1],
-            color="magenta",
-            linestyle="--",
-            linewidth=2.5,
-            label="Opponent prediction",
-            zorder=7
+        opponent[:, 0],
+        opponent[:, 1],
+        color=color,
+        linestyle="--",
+        linewidth=2.5,
+        label=f"Opponent {idx} prediction",
+        zorder=7
         )
 
         ax.scatter(
-            opponent[0, 0],
-            opponent[0, 1],
-            color="magenta",
-            s=150,
-            marker="X",
-            label="Opponent",
-            zorder=8
+        opponent[0, 0],
+        opponent[0, 1],
+        color=color,
+        s=150,
+        marker="X",
+        zorder=8
         )
 
         ax.add_patch(
-            plt.Circle(
-                opponent[0, :2],
-                0.4,
-                color="magenta",
-                alpha=0.15,
-                zorder=3
+        plt.Circle(
+            opponent[0, :2],
+            0.4,
+            color=color,
+            alpha=0.15,
+            zorder=3
             )
         )
 
@@ -714,7 +743,11 @@ def save_trajectory_snapshot(
         )
 
     # Numbered timesteps for opponent prediction
-    if np.isfinite(opponent).all() and np.max(np.abs(opponent)) < 100:
+    for idx, (opponent, color) in enumerate(zip(opponents, colors)):
+
+        if not np.isfinite(opponent).all() or np.max(np.abs(opponent)) >= 100:
+            continue
+
         for i, (x, y) in enumerate(opponent, start=1):
             ax.annotate(
                 str(i),
@@ -723,11 +756,11 @@ def save_trajectory_snapshot(
                 textcoords="offset points",
                 ha="center",
                 fontsize=7,
-                color="magenta",
+                color=color,
                 bbox=dict(
                     boxstyle="circle,pad=0.2",
                     facecolor="white",
-                    edgecolor="magenta",
+                    edgecolor=color,
                     alpha=0.9
                 ),
                 zorder=15
@@ -775,7 +808,9 @@ class MPPI(Node):
         self.pose_sub_ = self.create_subscription(Odometry, '/ego_racecar/odom', self.odom_callback, 1)
         self.drive_pub_ = self.create_publisher(AckermannDriveStamped, '/drive', 1)
         self.path_pub_ = self.create_publisher(Path, '/mppi/selected_path', 10)
-        self.opponent_sub_ = self.create_subscription(Path,'/opponent/predicted_path',self.opponent_callback,qos_profile_sensor_data)
+        self.opponent_sub_0 = self.create_subscription(Path,'/opponents/predicted_path_0',self.opponent_callback_0,qos_profile_sensor_data)
+        self.opponent_sub_1 = self.create_subscription(Path,'/opponents/predicted_path_1',self.opponent_callback_1,qos_profile_sensor_data)
+        self.opponent_sub_2 = self.create_subscription(Path,'/opponents/predicted_path_2',self.opponent_callback_2,qos_profile_sensor_data)
         self.wall_distance_pub_ = self.create_publisher(
             Float32MultiArray,
             '/mppi/wall_distances',
@@ -853,8 +888,14 @@ class MPPI(Node):
         self.config = MPPIConfig()
         self.U = jnp.zeros((self.config.H, self.config.NU))  # mean control sequence
         self.key = jax.random.PRNGKey(0)
-        self.opponent_xy = jnp.full((self.config.H, 2),1000.0)
-        self.opponent_path_time = None
+        self.opponent_xy_0 = jnp.full((self.config.H, 2),1000.0)
+        self.opponent_xy_1 = jnp.full((self.config.H, 2),1000.0)
+        self.opponent_xy_2 = jnp.full((self.config.H, 2),1000.0)
+
+        self.opponent_path_time_0 = None
+        self.opponent_path_time_1 = None
+        self.opponent_path_time_2 = None
+
         self.opponent_timeout = 2.0
 
         mppi_step(
@@ -863,14 +904,16 @@ class MPPI(Node):
             jnp.zeros(self.config.NX),
             jnp.zeros((self.config.H + 1, self.config.NX)),
             self.config,
-            self.opponent_xy,
+            self.opponent_xy_0,
+            self.opponent_xy_1,
+            self.opponent_xy_2,
             self.wall_env
         )
 
         
-    def opponent_callback(self, msg):
+    def opponent_callback_0(self, msg):
         if len(msg.poses) == 0:
-            self.opponent_path_time = None
+            self.opponent_path_time_0 = None
             return
 
         points = np.array([
@@ -879,11 +922,11 @@ class MPPI(Node):
         ], dtype=np.float32).reshape(-1, 2)
 
         if len(points) < 2:
-            self.opponent_path_time = None
+            self.opponent_path_time_0= None
             return
 
         if not np.isfinite(points).all():
-            self.opponent_path_time = None
+            self.opponent_path_time_0 = None
             return
 
         predicted = points[1:]
@@ -900,11 +943,81 @@ class MPPI(Node):
 
             predicted = np.vstack((predicted, padding))
 
-        self.opponent_xy = jnp.asarray(predicted)
+        self.opponent_xy_0 = jnp.asarray(predicted)
 
-        self.opponent_path_time = (
+        self.opponent_path_time_0 = (
             self.get_clock().now().nanoseconds * 1e-9
         )  
+
+    def opponent_callback_1(self,msg):
+        if len(msg.poses) ==0:
+            self.opponent_path_time_1 = None
+            return
+        points = np.array([
+                    [pose.pose.position.x, pose.pose.position.y]
+                    for pose in msg.poses
+                ], dtype=np.float32).reshape(-1, 2)
+        
+        if len(points) < 2:
+                    self.opponent_path_time_1= None
+                    return
+        
+        if not np.isfinite(points).all():
+                    self.opponent_path_time_1 = None
+                    return
+        
+        predicted = points[1:]
+        
+        if len(predicted) >= self.config.H:
+                    predicted = predicted[:self.config.H]
+        
+        else:
+            padding = np.repeat(
+                        predicted[-1:],
+                        self.config.H - len(predicted),
+                        axis=0
+                    )
+        
+            predicted = np.vstack((predicted, padding))
+        
+        self.opponent_xy_1 = jnp.asarray(predicted)
+        
+        self.opponent_path_time_1 = (
+                    self.get_clock().now().nanoseconds * 1e-9
+                )  
+    def opponent_callback_2(self,msg):
+        if len(msg.poses) ==0:
+            self.opponent_path_time_2 = None
+            return
+        points = np.array([
+                            [pose.pose.position.x, pose.pose.position.y]
+                            for pose in msg.poses
+                        ], dtype=np.float32).reshape(-1, 2)
+                
+        if len(points) < 2:
+            self.opponent_path_time_2= None
+            return
+                
+        if not np.isfinite(points).all():
+            self.opponent_path_time_2 = None
+            return
+                
+        predicted = points[1:]
+                
+        if len(predicted) >= self.config.H:
+                            predicted = predicted[:self.config.H]
+                
+        else:
+            padding = np.repeat(predicted[-1:],self.config.H - len(predicted),
+                                axis=0)
+                
+            predicted = np.vstack((predicted, padding))
+                
+        self.opponent_xy_2 = jnp.asarray(predicted)
+                
+        self.opponent_path_time_2 = (self.get_clock().now().nanoseconds * 1e-9) 
+
+        
 
     def publish_drive(self, speed, steering):
         msg = AckermannDriveStamped()
@@ -1010,19 +1123,31 @@ class MPPI(Node):
         self.key, subkey = jax.random.split(self.key)
         now = self.get_clock().now().nanoseconds * 1e-9
 
-        opponent_active = (
-            self.opponent_path_time is not None
-            and 0.0 <= now - self.opponent_path_time <= self.opponent_timeout
+        inactive = jnp.full((self.config.H, 2), 1000.0)
+
+        opponent_xy_0 = (
+            self.opponent_xy_0
+            if self.opponent_path_time_0 is not None
+            and 0 <= now - self.opponent_path_time_0 <= self.opponent_timeout
+            else inactive
         )
 
-        opponent_xy = (
-            self.opponent_xy
-            if opponent_active
-            else jnp.full((self.config.H, 2), 1000.0)
+        opponent_xy_1 = (
+            self.opponent_xy_1
+            if self.opponent_path_time_1 is not None
+            and 0 <= now - self.opponent_path_time_1 <= self.opponent_timeout
+            else inactive
         )
+
+        opponent_xy_2 = (
+            self.opponent_xy_2
+            if self.opponent_path_time_2 is not None
+            and 0 <= now - self.opponent_path_time_2 <= self.opponent_timeout
+            else inactive
+        )
+
         # TODO: run MPPI, keep the new mean control sequence in self.U
 
-        print(f"OPPONENT FIRST POSITION: {np.asarray(opponent_xy[0])}")
 
         self.U, sampled_paths, sampled_costs, sampled_controls = mppi_step(
             subkey,
@@ -1030,7 +1155,9 @@ class MPPI(Node):
             vehicle_state,
             ref_path,
             self.config,
-            opponent_xy,
+            opponent_xy_0,
+            opponent_xy_1,
+            opponent_xy_2,
             self.wall_env
         )
 
@@ -1051,7 +1178,9 @@ class MPPI(Node):
             costs = np.asarray(sampled_costs)
             selected = np.asarray(selected_trajectory)
             reference = np.asarray(ref_path)
-            opponent = np.asarray(opponent_xy)
+            opponent_0 = np.asarray(opponent_xy_0)
+            opponent_1 = np.asarray(opponent_xy_1)
+            opponent_2 = np.asarray(opponent_xy_2)
 
             best_idx = int(np.argmin(costs))
 
@@ -1060,7 +1189,9 @@ class MPPI(Node):
                 sampled_controls[best_idx],
                 ref_path,
                 self.config,
-                opponent_xy,
+                opponent_xy_0,
+                opponent_xy_1,
+                opponent_xy_2,
                 self.wall_env,
                 return_components=True
             )
@@ -1070,7 +1201,9 @@ class MPPI(Node):
                 self.U,
                 ref_path,
                 self.config,
-                opponent_xy,
+                opponent_xy_0,
+                opponent_xy_1,
+                opponent_xy_2,
                 self.wall_env,
                 return_components=True
             )
@@ -1095,7 +1228,9 @@ class MPPI(Node):
                     costs,
                     selected,
                     reference,
-                    opponent,
+                    opponent_0,
+                    opponent_1,
+                    opponent_2,
                     self.wall_sdf_np,
                     self.wall_origin_np,
                     self.wall_resolution,
@@ -1116,34 +1251,12 @@ class MPPI(Node):
 
         wall_distances = np.asarray(self.wall_env.sample_wall_distance(selected_trajectory[1:, :2]))
 
-        print("\nTIMESTEP | DISTANCE TO WALL")
-
-        for i, distance in enumerate(wall_distances):
-            print(f"{i+1:3d} | {distance:.3f} m")
-
         msg = Float32MultiArray()
         msg.data = wall_distances.tolist()
 
         self.wall_distance_pub_.publish(msg)
 
-        ego_xy = np.asarray(selected_trajectory[1:, :2])
-        opp_xy = np.asarray(opponent_xy)
-
-        print("\nTIMESTEP | TIME | EGO X,Y | OPPONENT X,Y | DISTANCE")
-
-        for i in range(min(len(ego_xy), len(opp_xy))):
-
-            distance = np.linalg.norm(ego_xy[i] - opp_xy[i])
-
-            print(
-                f"{i+1:3d} | "
-                f"{(i+1)*self.config.DT:.2f}s | "
-                f"{ego_xy[i]} | "
-                f"{opp_xy[i]} | "
-                f"{distance:.3f} m"
-            )
-
-        
+        ego_xy = np.asarray(selected_trajectory[1:, :2])        
 
         path_msg = Path()
         path_msg.header.stamp = self.get_clock().now().to_msg()
@@ -1230,7 +1343,7 @@ RACE 3
 - At each step test if it is better than the last implementation - Ablation study
 1. Validate basic obstacle avoidance with arclength progress - DONE
 2. Grab cedric's opponent locator code and opponent predictor code - DONE
-3. Implement Cedric's v1 opponent passing code with just bubble cost -TODO
+3. Implement Cedric's v1 opponent passing code with just bubble cost - DONE
 4. Need to adjust all of this code to be able to deal with multiple cars - TODO
 --------------------------------------------------------------------------------------
 

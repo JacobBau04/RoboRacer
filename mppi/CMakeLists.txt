@@ -30,7 +30,6 @@ ament_python_install_package(${PROJECT_NAME})
 
 install(PROGRAMS
   scripts/mppi_node.py
-  scripts/pure_pursuit.py
   scripts/mppi_utils.py
   scripts/infer_env.py
   scripts/opponent_predictor_node.py
@@ -45,10 +44,7 @@ install(DIRECTORY scripts/dynamics_models/
   DESTINATION lib/${PROJECT_NAME}/dynamics_models
 )
 
-# ==========================================
-# Opponent LiDAR Detector
-# ==========================================
-
+## Original detector
 add_executable(opponent_lidar_detector_node
   scripts/opponent_lidar_detector_node.cpp
 )
@@ -63,6 +59,23 @@ ament_target_dependencies(opponent_lidar_detector_node
   visualization_msgs
 )
 
+# Four-car detector
+add_executable(opponent_lidar_detector_node_4_car
+  scripts/opponent_lidar_detector_node_4_car.cpp
+)
+
+ament_target_dependencies(opponent_lidar_detector_node_4_car
+  rclcpp
+  ament_index_cpp
+  geometry_msgs
+  nav_msgs
+  sensor_msgs
+  std_msgs
+  visualization_msgs
+  tf2
+  tf2_ros
+  tf2_geometry_msgs
+)
 # ==========================================
 # Opponent Predictor
 # ==========================================
@@ -87,6 +100,7 @@ ament_target_dependencies(opponent_predictor_node
 # Install C++ executables
 install(TARGETS
   opponent_lidar_detector_node
+  opponent_lidar_detector_node_4_car
   opponent_predictor_node
   DESTINATION lib/${PROJECT_NAME}
 )

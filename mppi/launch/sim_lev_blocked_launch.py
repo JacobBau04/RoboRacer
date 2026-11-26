@@ -25,7 +25,7 @@ def generate_launch_description():
 
     opponent_detector = Node(
         package='mppi',
-        executable='opponent_lidar_detector_node',
+        executable='opponent_lidar_detector_node_4_car',
         name='opponent_lidar_detector',
         output='screen'
     )
