@@ -1,0 +1,7 @@
+# Offline test dependencies; ROS is intentionally not needed.
+numpy>=1.26
+scipy>=1.12
+jax>=0.4.26
+pytest>=8
+PyYAML>=6
+Pillow>=10

@@ -17,10 +17,10 @@ def generate_launch_description():
     opp_csv_path = os.path.join(get_package_share_directory('mppi'), 'waypoints', 'levine_race_semicolon.csv')
 
     # Finds the opponent in /scan: drops points on /map walls (map from particle_filter's map_server),
-    # clusters the rest near the raceline, publishes /opponent/detection_odom
+    # clusters the rest near the raceline, publishes /opponents/detection_odom_{0,1,2}
     opponent_detector = Node(
         package='mppi',
-        executable='opponent_lidar_detector_node',
+        executable='opponent_lidar_detector_node_4_car',
         name='opponent_lidar_detector',
         output='screen',
         parameters=[{
@@ -33,7 +33,7 @@ def generate_launch_description():
         }],
     )
 
-    # Filters the detections along the raceline and publishes /opponent/predicted_path (2 s ahead),
+    # Filters the detections along the raceline and publishes /opponents/predicted_path_{0,1,2} (2 s ahead),
     # which mppi_node uses for its opponent-avoidance cost
     opponent_predictor = Node(
         package='mppi',
@@ -56,6 +56,7 @@ def generate_launch_description():
             'waypoint_path': csv_path,
             # same values as the MPC's 'race' estimator (particle filter on /pf/pose/odom)
             'pose_offset': 0.27,   # LiDAR is 0.27 m ahead of the rear axle (base_link -> laser TF)
+            'prediction_start_delay': 0.14,  # actuation delay only; prediction is already current
             'delay_comp': 0.20,    # measured steering command -> turn in pose delay
         }],
         # node hard-codes the sim topic; feed it the particle filter pose

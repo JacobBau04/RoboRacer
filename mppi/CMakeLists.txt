@@ -31,6 +31,9 @@ ament_python_install_package(${PROJECT_NAME})
 install(PROGRAMS
   scripts/mppi_node.py
   scripts/mppi_utils.py
+  scripts/mppi_core.py
+  scripts/physics_overtaking.py
+  scripts/wall_map.py
   scripts/infer_env.py
   scripts/opponent_predictor_node.py
   DESTINATION lib/${PROJECT_NAME}

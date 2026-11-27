@@ -7,3 +7,6 @@ mpc/data/
 COLCON_IGNORE
 .classroom50.yaml
 .github/
+
+.venv/
+.pytest_cache/
