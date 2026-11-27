@@ -22,6 +22,7 @@
   <depend>tf2_geometry_msgs</depend>
 
   <exec_depend>ros2launch</exec_depend>
+  <!-- Numeric and map-loading dependencies. -->
   <exec_depend>python3-numpy</exec_depend>
   <exec_depend>python3-scipy</exec_depend>
   <exec_depend>python3-yaml</exec_depend>

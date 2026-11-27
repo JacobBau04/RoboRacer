@@ -1,3 +1,5 @@
+# Related: Patrick & Bakolas (2024), arxiv.org/abs/2403.18066.
+# Uses explicit behavior modes rather than their rollout clustering.
 """Physics-only LEFT / RIGHT / FOLLOW planner. No ROS imports or learned policy.
 
 The state is [rear_axle_x, rear_axle_y, yaw, speed]. Opponent points are
@@ -17,6 +19,7 @@ from mppi_core import MPPIConfig, cost, rollout, simulate, simulate_jit
 
 @dataclass(frozen=True)
 class PlannerConfig:
+    # Configurable starting assumptions, exposed as overtaking.* ROS parameters.
     samples_per_mode: int = 256
     car_length: float = 0.51
     car_width: float = 0.28
@@ -108,6 +111,7 @@ class Track:
         fraction = np.clip(np.sum((point - self.xy) * self.delta, axis=1) / self.lengths**2, 0, 1)
         projection = self.xy + fraction[:, None] * self.delta
         i = int(np.argmin(np.sum((point - projection)**2, axis=1)))
+        # Positive lateral distance is left of the track tangent.
         tangent = self.delta[i] / self.lengths[i]
         lateral = float(np.dot(point - projection[i], [-tangent[1], tangent[0]]))
         return float(self.s[i] + fraction[i] * self.lengths[i]), lateral
@@ -125,6 +129,7 @@ class Track:
         return xy, yaw, speed
 
 
+# FOLLOW uses the BRAKE scenario at index 1.
 SCENARIO_NAMES = ('CONTINUE', 'BRAKE', 'LEFT', 'RIGHT', 'BRAKE_LEFT', 'BRAKE_RIGHT')
 
 
@@ -242,6 +247,7 @@ def mode_update(key, warm, seed, state, reference, opponents, active, previous_s
     _, limited = jax.lax.scan(limit, jnp.full(cfg.T, previous_steer), controls.swapaxes(0, 1))
     controls = limited.swapaxes(0, 1).at[0].set(seed)
     paths = rollout(state, controls, cfg)
+    # Reject against all scenarios; nominal paths only determine soft costs.
     checks = opponents if scenario_paths is None else scenario_paths
     check_active = active if scenario_active is None else scenario_active
     valid = jax.vmap(trajectory_valid, in_axes=(0, 0, None, None, None, None, None, None))(
@@ -253,6 +259,7 @@ def mode_update(key, warm, seed, state, reference, opponents, active, previous_s
     totals = jnp.sum(costs, axis=1)
     valid = valid & jnp.isfinite(totals)
     count = jnp.sum(valid)
+    # Exclude invalid samples from normalization, including all-invalid batches.
     low = jnp.min(jnp.where(valid, totals, jnp.inf))
     high = jnp.max(jnp.where(valid, totals, -jnp.inf))
     low = jnp.where(count > 0, low, 0.0)
@@ -374,6 +381,7 @@ class OvertakingPlanner:
         path = np.asarray(simulate_jit(jnp.asarray(state), jnp.asarray(controls), cfg))
         valid = bool(trajectory_valid(jnp.asarray(path), jnp.asarray(controls), jnp.asarray(opponents),
                                      jnp.asarray(active), cfg, p, self.wall_env, previous_steer))
+        # Invalid braking plans trigger a stop request, not a certified escape.
         self.behavior = 'BRAKE'
         self.warm.clear()
         return Plan('BRAKE', controls, path, valid, reason, {})
@@ -392,6 +400,7 @@ class OvertakingPlanner:
         scenarios = np.asarray(scenarios, dtype=float)
         if scenarios.shape != (3, len(SCENARIO_NAMES), cfg.H + 1, 2) or not np.isfinite(scenarios).all():
             raise ValueError('Expected finite scenarios [3, 6, H+1, 2]')
+        # Keep opponent-major order consistent with the repeated active mask.
         checks = scenarios.reshape(-1, cfg.H + 1, 2)
         check_active = np.repeat(active, len(SCENARIO_NAMES))
         if stale:

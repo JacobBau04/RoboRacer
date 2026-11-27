@@ -28,6 +28,7 @@ endforeach()
 # Install Python modules
 ament_python_install_package(${PROJECT_NAME})
 
+# Install helpers beside the node for its direct imports.
 install(PROGRAMS
   scripts/mppi_node.py
   scripts/mppi_utils.py

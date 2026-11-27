@@ -1,3 +1,4 @@
+# MPPI background: Williams et al. (2017), doi:10.2514/1.G001921.
 """ROS-independent bicycle model and original MPPI objective/update.
 
 Kept separate so offline tests exercise the same dynamics used by the ROS node.

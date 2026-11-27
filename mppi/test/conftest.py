@@ -1,3 +1,4 @@
+# Import source modules without a ROS build.
 from pathlib import Path
 import sys
 

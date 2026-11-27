@@ -12,6 +12,7 @@ class WallEnv:
     def __init__(self, map_yaml):
         path = Path(map_yaml).expanduser().resolve()
         config = yaml.safe_load(path.read_text())
+        # Image rows run opposite to map y.
         image = np.flipud(np.asarray(Image.open(path.parent / config['image']).convert('L')))
         probability = image / 255.0 if config.get('negate', 0) else (255.0 - image) / 255.0
         # Unknown pixels are not certified free. Pad the map with occupied cells.

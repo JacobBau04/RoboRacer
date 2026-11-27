@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# ROS I/O for the overtaking planner and optional legacy controller.
 from dataclasses import dataclass
 from functools import partial
 from typing import final
@@ -645,6 +646,7 @@ class MPPI(Node):
         now = self.get_clock().now().nanoseconds * 1e-9
         cfg = self.physics_planner.cfg
         paths = np.full((3, cfg.H + 1, 2), 1000.0)
+        # [opponent, scenario, future time, x/y]
         scenarios = np.repeat(paths[:, None], len(SCENARIO_NAMES), axis=1)
         active = np.zeros(3, dtype=bool)
         stale = bool(self.physics_invalid)

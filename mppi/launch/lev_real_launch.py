@@ -1,3 +1,4 @@
+# Requires the car stack, localization and map server.
 from launch import LaunchDescription
 from launch.actions import TimerAction
 from launch_ros.actions import Node
